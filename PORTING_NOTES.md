@@ -14,7 +14,7 @@ with a reason — nothing is dropped silently.
 | Phase | Scope | Status | Notes |
 |-------|-------|--------|-------|
 | 1 | Skeleton + data layer (`core/`, `db/`) | ✅ done | rusqlite DAO, schema init, UDF/collation registration, CRUD + search + pagination. `cargo test` green; CLI smoke lists books. |
-| 2 | FB2/FBD engine (`fb2/`) | ⬜ todo | Streaming parser (quick-xml) → typed model → serializer; FBD container support. |
+| 2 | FB2/FBD engine (`fb2/`) | ✅ done | Lossless element-tree model (quick-xml parse, hand-rolled serialize), typed accessors (title/authors/genre/lang/annotation/cover), FBD = ZIP read/write. `cargo test` green incl. round-trip. |
 | 3 | Headless import/export (`import/`, `export/`) | ⬜ todo | FB2/FBD/INPX/folder import; export to FB2/FBD/device. Background threads + progress. |
 | 4 | GUI shell + tree navigation (egui) | ⬜ todo | Main window, Author/Genre/Series/Folder trees, detail panel, add/edit/delete dialogs. |
 | 5 | Search UI, settings, stats | ⬜ todo | Search presets, persisted settings, reader associations, statistics view. |
@@ -43,6 +43,16 @@ compatibility exact. `Db::set_triggers_enabled(false)` is available to skip them
 Immediate-mode, pure Rust, single static binary, strong fit for a dense tree/table/detail app. The
 entire UI sits behind one module so it can be swapped (iced/slint/Tauri) without touching data/logic.
 *(Chosen to match the stack already validated in the prior interactive-verification run.)*
+
+### D4 — FB2 model = lossless element tree + typed accessors (not a rigid struct per tag)
+A generic `Element`/`Node` tree preserves **every** element, attribute and text run exactly as parsed,
+so parse → serialize → parse is lossless by construction (verified by test). Typed accessors on
+`Fb2` (`book_title`, `authors`, `genre`, `lang`, `annotation`, `cover`, `binary`, `body_sections`)
+give the app the fields it imports without sacrificing fidelity for exotic markup. Serialization is
+hand-rolled (no quick-xml Writer) so output is fully controlled and re-parses to an identical tree.
+Dropped on parse (not book content): XML declaration, comments, processing instructions, CDATA,
+doctype, general entity refs. FBD is a plain ZIP of `.fb2` entries + cover image(s), read/written via
+the `zip` crate (`SimpleFileOptions`).
 
 ---
 
@@ -77,3 +87,6 @@ These were read from the FreePascal source, not guessed — implementers should 
 - **Phase 1** — `cargo test` (integration: schema init idempotency, author/series dedup, search-column
   population via UDFs, paginated title/author search, soft-delete filtering). CLI smoke:
   `myhomelib init demo.db --demo && myhomelib books demo.db`.
+- **Phase 2** — `cargo test` (fb2: typed extraction of title/authors/genre/lang/annotation/cover on a
+  Cyrillic fixture with nested sections + inline markup; lossless parse→serialize→parse tree equality;
+  FBD write→open round-trip preserving the book and cover). 6 fb2 tests + 5 dao tests all green.
