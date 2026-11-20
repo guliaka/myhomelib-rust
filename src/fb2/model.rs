@@ -112,6 +112,15 @@ impl Fb2 {
         self.title_info().and_then(|t| t.find("annotation")).map(|e| e.all_text())
     }
 
+    /// Series (`<series>` in title-info): name and optional number.
+    pub fn series(&self) -> Option<SeriesInfo> {
+        let s = self.title_info()?.find("series")?;
+        Some(SeriesInfo {
+            name: s.find("name").map(|n| n.all_text()).filter(|x| !x.trim().is_empty()),
+            number: s.find("number").and_then(|n| n.all_text().trim().parse::<f64>().ok()),
+        })
+    }
+
     /// Cover image bytes: follow `<coverpage><image xlink:href="#id">` to the matching `<binary id>`.
     pub fn cover(&self) -> Option<Vec<u8>> {
         let cp = self.title_info()?.find("coverpage")?;
@@ -155,6 +164,14 @@ pub struct AuthorInfo {
     pub last_name: Option<String>,
     pub first_name: Option<String>,
     pub middle_name: Option<String>,
+}
+
+/// An FB2 series (mirrors `<series>` name/number in title-info).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SeriesInfo {
+    pub name: Option<String>,
+    /// Series position; fractional numbers are allowed in FB2.
+    pub number: Option<f64>,
 }
 
 fn decode_b64(s: &str) -> Option<Vec<u8>> {

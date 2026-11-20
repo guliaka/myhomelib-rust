@@ -223,6 +223,21 @@ impl Db {
         Ok(out)
     }
 
+    /// Find a book by its source-file identity (folder + file name + position in container). Used
+    /// for import dedupe — the original keys local books on their file, not on title/author.
+    pub fn find_book_by_file(&self, folder: Option<&str>, file_name: &str, inside_no: i32) -> Result<Option<i64>> {
+        let out = self
+            .conn
+            .query_row(
+                "SELECT BookID FROM Books \
+                 WHERE IFNULL(Folder,'')=IFNULL(?1,'') AND FileName=?2 AND InsideNo=?3",
+                params![folder, file_name, inside_no],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(out)
+    }
+
     /// Authors linked to a book.
     pub fn book_authors(&self, book_id: i64) -> Result<Vec<Author>> {
         let mut stmt = self.conn.prepare(

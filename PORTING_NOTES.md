@@ -15,7 +15,7 @@ with a reason — nothing is dropped silently.
 |-------|-------|--------|-------|
 | 1 | Skeleton + data layer (`core/`, `db/`) | ✅ done | rusqlite DAO, schema init, UDF/collation registration, CRUD + search + pagination. `cargo test` green; CLI smoke lists books. |
 | 2 | FB2/FBD engine (`fb2/`) | ✅ done | Lossless element-tree model (quick-xml parse, hand-rolled serialize), typed accessors (title/authors/genre/lang/annotation/cover), FBD = ZIP read/write. `cargo test` green incl. round-trip. |
-| 3 | Headless import/export (`import/`, `export/`) | ⬜ todo | FB2/FBD/INPX/folder import; export to FB2/FBD/device. Background threads + progress. |
+| 3 | Headless import/export (`import.rs`, `export.rs`) | ✅ done | Folder + FBD import (extract title/authors/genre/lang/series/annotation, dedupe by source-file identity), metadata export to FB2. INPX import, device export, and background threads/progress deferred to the GUI phases. `cargo test` green incl. import/export round-trip. |
 | 4 | GUI shell + tree navigation (egui) | ⬜ todo | Main window, Author/Genre/Series/Folder trees, detail panel, add/edit/delete dialogs. |
 | 5 | Search UI, settings, stats | ⬜ todo | Search presets, persisted settings, reader associations, statistics view. |
 | 6 | Librusec client + download queue (`librusec/`) | ⬜ todo | Remote browse/search, queued downloads with progress/cancel/resume. |
@@ -54,6 +54,18 @@ Dropped on parse (not book content): XML declaration, comments, processing instr
 doctype, general entity refs. FBD is a plain ZIP of `.fb2` entries + cover image(s), read/written via
 the `zip` crate (`SimpleFileOptions`).
 
+### D5 — Import dedupe key = source-file identity (folder + file name + position in container)
+Matches the original's `InsertBook` (`unit_Database_SQLite.pas`): re-importing the same physical file is
+a no-op, while a renamed/moved file creates a new entry. We do **not** dedupe on title+author — that would
+silently drop legitimately distinct books and diverge from the original. `Importer` stores
+`Folder/FileName/InsideNo`; FBD members get a distinct `InsideNo` per position in the container, so a
+multi-book FBD is tracked as one source file with several catalog entries.
+
+### D6 — Export is metadata-only
+The DB stores catalog metadata, not body text (that lives in the source file). `Exporter::book_to_fb2`
+rebuilds an FB2 from title-info + annotation only — for catalog exchange and round-trip verification, not
+a full-content backup. Re-reading the source file to export full bodies is deferred with the GUI.
+
 ---
 
 ## Faithful behavior recovered from the original source
@@ -70,9 +82,10 @@ These were read from the FreePascal source, not guessed — implementers should 
 
 ## Known deltas / open questions (resolve or confirm per phase)
 
-- **Built-in FB2 genre tree** (`InternalLoadGenres` in the original) is **not yet ported** — a fresh
-  collection starts with an empty `Genres` table. Populate via import or add the seed data in Phase 3.
-  *Action: locate the original's default-genre source file and embed it.*
+- **Built-in FB2 genre tree** (`InternalLoadGenres` in the original) is **not yet ported**. Import now
+  populates `Genres` from each book's raw FB2 `<genre>` code (upserted by code), so a collection grows its
+  genres as books are imported — but a *fresh empty* collection still has none until something is imported.
+  *Action: embed the original's default-genre seed file (Phase 6 or a data file) for parity on new installs.*
 - **`UpdateDate` format** is stored as a `VARCHAR(23)` string; kept verbatim for compatibility. Confirm
   the exact format string before any date re-formatting in the GUI (Phase 4/5).
 - **`Review` column** is a BLOB in the original (possibly non-UTF-8); carried as `Option<Vec<u8>>`.
@@ -90,3 +103,7 @@ These were read from the FreePascal source, not guessed — implementers should 
 - **Phase 2** — `cargo test` (fb2: typed extraction of title/authors/genre/lang/annotation/cover on a
   Cyrillic fixture with nested sections + inline markup; lossless parse→serialize→parse tree equality;
   FBD write→open round-trip preserving the book and cover). 6 fb2 tests + 5 dao tests all green.
+- **Phase 3** — `cargo test` (import_export: folder + FBD import extracting title/authors/genre/lang/series/
+  annotation, source-file dedupe so a re-import adds nothing, and export that round-trips metadata back
+  through the FB2 engine). CLI e2e verified: `init → import → books → export`. 14 tests green total
+  (2 lib + 5 dao + 6 fb2 + 1 import/export).

@@ -2,8 +2,12 @@
 //! paginate books, and report stats. Against a *real* user MyHomeLib `.db`, `books`/`stats` work
 //! unchanged (the schema is identical).
 
+use std::path::Path;
+
 use myhomelib::core::Book;
 use myhomelib::db::{BookQuery, Db};
+use myhomelib::export::Exporter;
+use myhomelib::import::Importer;
 
 fn main() {
     init_tracing();
@@ -28,6 +32,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some("init") => cmd_init(&args[1..]),
         Some("books") => cmd_books(&args[1..]),
         Some("stats") => cmd_stats(&args[1..]),
+        Some("import") => cmd_import(&args[1..]),
+        Some("export") => cmd_export(&args[1..]),
         _ => {
             print_usage();
             Ok(())
@@ -109,14 +115,45 @@ fn cmd_stats(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn cmd_import(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let path = args.first().ok_or("usage: myhomelib import <db-path> <dir>")?;
+    let dir = args.get(1).ok_or("usage: myhomelib import <db-path> <dir>")?.clone();
+    let mut db = Db::open(path)?;
+    let mut importer = Importer::new(&mut db, &dir);
+    let report = importer.import_dir(Path::new(&dir))?;
+    println!(
+        "imported={} existing={} errors={}",
+        report.imported,
+        report.existing,
+        report.errors.len()
+    );
+    for (p, e) in &report.errors {
+        eprintln!("  error: {} — {e}", p.display());
+    }
+    Ok(())
+}
+
+fn cmd_export(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let path = args.first().ok_or("usage: myhomelib export <db-path> <book-id> <out.fb2>")?;
+    let id: i64 = args.get(1).ok_or("missing <book-id>")?.parse()?;
+    let out = args.get(2).ok_or("missing <out.fb2>")?;
+    let db = Db::open(path)?;
+    let exporter = Exporter::new(&db);
+    let bytes = exporter.export_book(id, Path::new(out))?;
+    println!("exported book {id} to {out} ({} bytes)", bytes.len());
+    Ok(())
+}
+
 fn print_usage() {
     eprintln!(
-        "myhomelib — Phase 1 data-layer smoke CLI\n\
+        "myhomelib — data-layer + FB2/FBD CLI\n\
          \n\
          usage:\n\
-         \x20 myhomelib init  <db-path> [--demo]\n\
-         \x20 myhomelib books <db-path> [--query Q] [--author A] [--limit N] [--offset M]\n\
-         \x20 myhomelib stats <db-path>"
+         \x20 myhomelib init    <db-path> [--demo]\n\
+         \x20 myhomelib books   <db-path> [--query Q] [--author A] [--limit N] [--offset M]\n\
+         \x20 myhomelib stats   <db-path>\n\
+         \x20 myhomelib import  <db-path> <dir>\n\
+         \x20 myhomelib export  <db-path> <book-id> <out.fb2>"
     );
 }
 

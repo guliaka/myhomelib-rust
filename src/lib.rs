@@ -6,6 +6,8 @@
 pub mod core;
 pub mod db;
 pub mod error;
+pub mod export;
 pub mod fb2;
+pub mod import;
 
 pub use db::{BookQuery, CollectionStats, Db};
