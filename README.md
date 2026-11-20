@@ -3,17 +3,18 @@
 Rust rewrite of [MyHomeLib](https://github.com/guliaka/MyHomeLib.git) — a home e-book library
 manager (FreePascal/Lazarus original). Caters to FB2/FBD collections and Librusec-based libraries.
 
-**Status: Phase 1 of 7** — data layer only. See [`PORTING_NOTES.md`](./PORTING_NOTES.md) for the
-phase plan, decisions, and deferred items.
+**Status: Phases 1–2 of 7** — data layer + FB2/FBD engine. See [`PORTING_NOTES.md`](./PORTING_NOTES.md)
+for the phase plan, decisions, and deferred items.
 
 ## Layout
 ```
 src/
   core/     # domain types mirroring the SQLite schema + faithful UDF ports (format_name, upper)
   db/       # rusqlite DAO: schema init, UDF/collation registration, CRUD + search + pagination
+  fb2/      # FB2/FBD engine: lossless element-tree model, parser, serializer, ZIP container
   error.rs  # AppError
-  lib.rs    # library root (core, db, error)
-  main.rs   # Phase 1 smoke CLI (init / books / stats)
+  lib.rs    # library root (core, db, fb2, error)
+  main.rs   # smoke CLI (init / books / stats)
 schema/     # create_collection_db.sql — copied verbatim from the original
 tests/      # integration tests for the data layer
 ```
