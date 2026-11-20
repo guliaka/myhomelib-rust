@@ -304,6 +304,133 @@ impl Db {
     fn scalar_count(&self, sql: &str) -> Result<i64> {
         Ok(self.conn.query_row(sql, [], |r| r.get(0))?)
     }
+
+    // ------------------------------------------------------------------ GUI tree navigation
+
+    /// Authors that have books: `(AuthorID, display name, book count)`, sorted by name.
+    pub fn list_author_nodes(&self) -> Result<Vec<(i64, String, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT au.AuthorID, MHL_FULLNAME(au.LastName, au.FirstName, au.MiddleName, 0), COUNT(al.BookID) \
+             FROM Authors au JOIN Author_List al ON al.AuthorID = au.AuthorID \
+             GROUP BY au.AuthorID ORDER BY 2 COLLATE MHL_SYSTEM_NOCASE",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Series that have books: `(SeriesID, title, book count)`, sorted by title.
+    pub fn list_series_nodes(&self) -> Result<Vec<(i64, String, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT b.SeriesID, s.SeriesTitle, COUNT(*) \
+             FROM Books b JOIN Series s ON s.SeriesID = b.SeriesID \
+             WHERE b.IsDeleted = 0 GROUP BY b.SeriesID ORDER BY 2 COLLATE MHL_SYSTEM_NOCASE",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Genres in use: `(code, display name, book count)`, sorted by name. Derived from the `Genre_List`
+    /// links (always present); the `Genres` catalog is left-joined only for a human alias, falling back
+    /// to the raw code when no catalog row exists yet.
+    pub fn list_genre_nodes(&self) -> Result<Vec<(String, String, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT gl.GenreCode, IFNULL(g.GenreAlias, gl.GenreCode), COUNT(*) \
+             FROM Genre_List gl LEFT JOIN Genres g ON g.GenreCode = gl.GenreCode \
+             GROUP BY gl.GenreCode ORDER BY 2 COLLATE MHL_SYSTEM_NOCASE",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Folders that have books: `(folder, book count)`; `None` = collection root.
+    pub fn list_folder_nodes(&self) -> Result<Vec<(Option<String>, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT Folder, COUNT(*) FROM Books WHERE IsDeleted = 0 \
+             GROUP BY Folder ORDER BY 1 COLLATE MHL_SYSTEM_NOCASE",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, Option<String>>(0)?, r.get(1)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Books by exact author.
+    pub fn books_by_author(&self, author_id: i64) -> Result<Vec<Book>> {
+        let sql = format!(
+            "SELECT {} FROM Books b WHERE b.IsDeleted = 0 \
+             AND EXISTS (SELECT 1 FROM Author_List al WHERE al.BookID = b.BookID AND al.AuthorID = ?1) \
+             ORDER BY b.Title COLLATE MHL_SYSTEM_NOCASE",
+            book_cols("b")
+        );
+        self.query_books(&sql, vec![Box::new(author_id)])
+    }
+
+    /// Books by genre code.
+    pub fn books_by_genre(&self, code: &str) -> Result<Vec<Book>> {
+        let sql = format!(
+            "SELECT {} FROM Books b WHERE b.IsDeleted = 0 \
+             AND EXISTS (SELECT 1 FROM Genre_List gl WHERE gl.BookID = b.BookID AND gl.GenreCode = ?1) \
+             ORDER BY b.Title COLLATE MHL_SYSTEM_NOCASE",
+            book_cols("b")
+        );
+        self.query_books(&sql, vec![Box::new(code.to_string())])
+    }
+
+    /// Books in a series (ordered by sequence number).
+    pub fn books_by_series(&self, series_id: i64) -> Result<Vec<Book>> {
+        let sql = format!(
+            "SELECT {} FROM Books b WHERE b.IsDeleted = 0 AND b.SeriesID = ?1 \
+             ORDER BY b.SeqNumber, b.Title COLLATE MHL_SYSTEM_NOCASE",
+            book_cols("b")
+        );
+        self.query_books(&sql, vec![Box::new(series_id)])
+    }
+
+    /// Books in a folder (`None` = root).
+    pub fn books_by_folder(&self, folder: Option<&str>) -> Result<Vec<Book>> {
+        let sql = format!(
+            "SELECT {} FROM Books b WHERE b.IsDeleted = 0 AND IFNULL(b.Folder,'') = IFNULL(?1,'') \
+             ORDER BY b.Title COLLATE MHL_SYSTEM_NOCASE",
+            book_cols("b")
+        );
+        self.query_books(&sql, vec![Box::new(folder.map(|s| s.to_string()))])
+    }
+
+    /// Run a `SELECT … FROM Books b …` query that maps rows via [`row_to_book`].
+    fn query_books(&self, sql: &str, params: Vec<Box<dyn ToSql>>) -> Result<Vec<Book>> {
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map(params_from_iter(params), row_to_book)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Soft-delete a book (sets `IsDeleted = 1`), matching the original's soft-delete model.
+    pub fn soft_delete_book(&mut self, book_id: i64) -> Result<()> {
+        let n = self
+            .conn
+            .execute("UPDATE Books SET IsDeleted = 1 WHERE BookID = ?1", params![book_id])?;
+        if n == 0 {
+            return Err(crate::error::AppError::Other(format!("no book with id {book_id}")));
+        }
+        Ok(())
+    }
 }
 
 /// Build the WHERE clause + params for a [`BookQuery`]. Shared by search and count.

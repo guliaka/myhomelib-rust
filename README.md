@@ -3,8 +3,8 @@
 Rust rewrite of [MyHomeLib](https://github.com/guliaka/MyHomeLib.git) — a home e-book library
 manager (FreePascal/Lazarus original). Caters to FB2/FBD collections and Librusec-based libraries.
 
-**Status: Phases 1–3 of 7** — data layer, FB2/FBD engine, and headless import/export. See
-[`PORTING_NOTES.md`](./PORTING_NOTES.md) for the phase plan, decisions, and deferred items.
+**Status: Phases 1–4 of 7** — data layer, FB2/FBD engine, headless import/export, and the egui GUI shell.
+See [`PORTING_NOTES.md`](./PORTING_NOTES.md) for the phase plan, decisions, and deferred items.
 
 ## Layout
 ```
@@ -14,11 +14,13 @@ src/
   fb2/      # FB2/FBD engine: lossless element-tree model, parser, serializer, ZIP container
   import.rs # headless catalog import (scan dir, extract metadata, dedupe by source file)
   export.rs # headless metadata export (rebuild an FB2 from a stored book)
+  gui/      # egui GUI: state (pure Rust) + view (egui) + eframe window runner (`gui` feature)
   error.rs  # AppError
-  lib.rs    # library root (core, db, fb2, import, export, error)
+  lib.rs    # library root (core, db, fb2, import, export, gui, error)
   main.rs   # CLI (init / books / stats / import / export)
+  bin/gui.rs# native GUI binary `myhomelib-gui` (behind the `gui` feature)
 schema/     # create_collection_db.sql — copied verbatim from the original
-tests/      # integration tests: data layer, FB2/FBD round-trip, import/export
+tests/      # integration tests: data layer, FB2/FBD round-trip, import/export, headless GUI
 ```
 
 ## Build & test
@@ -42,3 +44,15 @@ cargo run -- stats   demo.db                    # collection counts
 cargo run -- import  demo.db /path/to/fb2-dir   # scan dir for .fb2/.fbd, extract + dedupe
 cargo run -- export  demo.db <book-id> out.fb2  # rebuild a book's metadata as FB2
 ```
+
+## GUI (Phase 4)
+The windowed app is egui/eframe. The navigation **state** is pure Rust and the **view** is pure egui, so
+both are tested headlessly (`cargo test`). Only the native window runner needs winit/GL, behind the
+`gui` feature:
+
+```sh
+cargo run --features gui --bin myhomelib-gui [db-path]   # open the GUI (needs a display)
+```
+
+On a headless box the `gui` feature still builds and links; it just can't open a window without
+`$DISPLAY`/Wayland. The Windows target is where it ships as part of the single `.exe`.

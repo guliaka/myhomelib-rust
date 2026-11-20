@@ -5,10 +5,17 @@ edition = "2021"
 description = "MyHomeLib — home e-book library manager (Rust rewrite of the FreePascal/Lazarus original)"
 license = "MIT"
 
-# Phase 1: data layer (core types + SQLite DAO). GUI/FB2/import/Librusec land in later phases.
+# Windowed GUI binary — only built when the `gui` feature is enabled (`cargo build --features gui`).
+[[bin]]
+name = "myhomelib-gui"
+path = "src/bin/gui.rs"
+required-features = ["gui"]
+
 [dependencies]
 base64 = "0.23.1"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+egui = "0.31"
+eframe = { version = "0.31", optional = true }
 quick-xml = "0.42.0"
 rusqlite = { version = "0.31", features = ["functions", "collation"] }
 thiserror = "1"
@@ -26,6 +33,10 @@ tempfile = "3"
 #   cargo test --no-default-features
 default = ["bundled"]
 bundled = ["rusqlite/bundled"]
+# Windowed eframe GUI (pulls winit/GL). The pure-egui view + state logic and its headless tests build
+# without this; only the native window runner needs it. Off by default so `cargo build`/`cargo test`
+# work on headless machines and the CLI stays dependency-light.
+gui = ["dep:eframe"]
 
 [profile.release]
 # Single self-contained Windows .exe is the end goal; keep it lean.

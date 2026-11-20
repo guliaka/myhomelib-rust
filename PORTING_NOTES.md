@@ -16,7 +16,7 @@ with a reason — nothing is dropped silently.
 | 1 | Skeleton + data layer (`core/`, `db/`) | ✅ done | rusqlite DAO, schema init, UDF/collation registration, CRUD + search + pagination. `cargo test` green; CLI smoke lists books. |
 | 2 | FB2/FBD engine (`fb2/`) | ✅ done | Lossless element-tree model (quick-xml parse, hand-rolled serialize), typed accessors (title/authors/genre/lang/annotation/cover), FBD = ZIP read/write. `cargo test` green incl. round-trip. |
 | 3 | Headless import/export (`import.rs`, `export.rs`) | ✅ done | Folder + FBD import (extract title/authors/genre/lang/series/annotation, dedupe by source-file identity), metadata export to FB2. INPX import, device export, and background threads/progress deferred to the GUI phases. `cargo test` green incl. import/export round-trip. |
-| 4 | GUI shell + tree navigation (egui) | ⬜ todo | Main window, Author/Genre/Series/Folder trees, detail panel, add/edit/delete dialogs. |
+| 4 | GUI shell + tree navigation (egui) | ✅ done | egui main window: category tabs (Authors/Genres/Series/Folders) + node tree with counts, book list, detail panel, search box, soft-delete. State is pure Rust (headless-tested); view is pure egui; eframe runner behind the `gui` feature. Add/edit dialogs deferred to Phase 5. |
 | 5 | Search UI, settings, stats | ⬜ todo | Search presets, persisted settings, reader associations, statistics view. |
 | 6 | Librusec client + download queue (`librusec/`) | ⬜ todo | Remote browse/search, queued downloads with progress/cancel/resume. |
 | 7 | Polish + performance | ⬜ todo | Startup profiling (<10 s), lazy loading, Windows cross-build verified. |
@@ -66,6 +66,15 @@ The DB stores catalog metadata, not body text (that lives in the source file). `
 rebuilds an FB2 from title-info + annotation only — for catalog exchange and round-trip verification, not
 a full-content backup. Re-reading the source file to export full bodies is deferred with the GUI.
 
+### D7 — GUI = pure-egui state/view + thin eframe runner behind a `gui` feature
+The navigation logic (`gui::state`) depends only on the data layer (no egui), and the rendering
+(`gui::view`) depends only on pure `egui` — so both compile and are unit-tested headlessly with no display.
+Only the window runner (`gui::app` + the `myhomelib-gui` binary) needs `eframe`/winit/GL, gated behind an
+optional `gui` feature (off by default). This keeps `cargo build`/`cargo test` working on headless CI/dev
+boxes while still producing the native window on a display or the Windows target. egui/eframe are pinned to
+**0.31** — the version validated in the prior interactive run and the last release with the classic
+`.show(ctx, |ui| …)` panel API (0.37 reworked panels onto a `&mut Ui`).
+
 ---
 
 ## Faithful behavior recovered from the original source
@@ -107,3 +116,7 @@ These were read from the FreePascal source, not guessed — implementers should 
   annotation, source-file dedupe so a re-import adds nothing, and export that round-trips metadata back
   through the FB2 engine). CLI e2e verified: `init → import → books → export`. 14 tests green total
   (2 lib + 5 dao + 6 fb2 + 1 import/export).
+- **Phase 4** — `cargo test` (gui: navigation by author/genre/series/folder with correct per-node book sets
+  and counts, search filtering, soft-delete removal, and a headless egui render smoke across two frames).
+  The `gui` feature (eframe/winit) also builds + links on this box; the binary runs and exits cleanly with a
+  "no display" error (expected headless). 17 tests green total.

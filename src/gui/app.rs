@@ -1,0 +1,27 @@
+//! Native eframe window runner for the GUI. Behind the `gui` feature (pulls winit/GL) so it only
+//! builds on machines with a display toolchain — e.g. the Windows target. The view/state logic it
+//! drives is pure egui and fully tested headlessly regardless of this module.
+
+use crate::db::Db;
+use crate::gui::{state, view};
+
+/// The eframe application: owns a [`State`] and forwards each frame to [`view::render`].
+pub struct MyHomeLibApp {
+    state: state::State,
+}
+
+impl MyHomeLibApp {
+    pub fn new(db_path: &str) -> Result<Self, crate::error::AppError> {
+        let db = Db::open(db_path)?;
+        Ok(Self {
+            state: state::State::new(db),
+        })
+    }
+}
+
+impl eframe::App for MyHomeLibApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        view::render(ctx, &mut self.state);
+        // eframe repaints on input; no extra timer is needed for Phase 4.
+    }
+}

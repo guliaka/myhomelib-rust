@@ -8,6 +8,7 @@ pub mod db;
 pub mod error;
 pub mod export;
 pub mod fb2;
+pub mod gui;
 pub mod import;
 
 pub use db::{BookQuery, CollectionStats, Db};
