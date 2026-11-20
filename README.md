@@ -20,17 +20,17 @@ tests/      # integration tests for the data layer
 ```
 
 ## Build & test
-Default build compiles SQLite from source (`bundled`) → single self-contained binary (the Windows
-target). On a dev machine **without a C compiler**, link against the OS SQLite instead:
+The default build compiles SQLite from source (`bundled`) → a single self-contained binary (the
+Windows target). With a C toolchain on the machine it just works:
 
 ```sh
-# needs libsqlite3 present; create a dev symlink if only libsqlite3.so.0 exists:
-mkdir -p .libs && ln -sf /usr/lib64/libsqlite3.so.0 .libs/libsqlite3.so
-RUSTFLAGS="-L native=$PWD/.libs" cargo test --no-default-features
+cargo build
+cargo test
 ```
 
-> Note: linking any Rust binary requires a C toolchain (`cc`) + glibc dev libs. If the host lacks
-> them, `sudo dnf install -y gcc` (or your distro equivalent) first.
+> Linking any Rust binary needs a C compiler (`cc`) + glibc dev libs — e.g. `sudo dnf install -y gcc`
+> on Fedora/Rocky. To link the system SQLite instead of bundling it, drop the default feature:
+> `cargo test --no-default-features`.
 
 ## Smoke CLI
 ```sh
