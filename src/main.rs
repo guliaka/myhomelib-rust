@@ -38,9 +38,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 fn cmd_init(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let path = args.first().ok_or("usage: myhomelib init <db-path> [--demo]")?;
     let demo = args.iter().any(|a| a == "--demo");
-    let db = Db::open(path)?;
+    let mut db = Db::open(path)?;
     if demo {
-        seed_demo(&db)?;
+        seed_demo(&mut db)?;
     }
     println!("initialized collection at {}", path);
     Ok(())
@@ -90,14 +90,12 @@ fn cmd_books(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     println!("{} book(s) matching — showing {} from offset {}", total, books.len(), offset);
     for b in &books {
         let authors: Vec<String> = db.book_authors(b.book_id)?.iter().map(|a| a.last_name.clone()).collect();
+        let author_str = if authors.is_empty() { "?".to_string() } else { authors.join(", ") };
         let lang = b.lang.as_deref().map(|l| format!(" [{}] ", l)).unwrap_or_default();
+        let progress = if b.progress > 0 { format!(" ({}%)", b.progress) } else { String::new() };
         println!(
             "  [{}] {} — {}{}{}",
-            b.book_id,
-            if authors.is_empty() { "?" } else { &authors.join(", ") },
-            b.title,
-            lang,
-            if b.progress > 0 { format!(" ({}%)", b.progress) } else { String::new() }
+            b.book_id, author_str, b.title, lang, progress
         );
     }
     Ok(())
@@ -149,7 +147,7 @@ fn demo_book(title: &str, lib_id: &str, lang: &str, progress: i32) -> Book {
 }
 
 /// Seed a small, deterministic demo dataset (including Cyrillic) so the smoke CLI has data to show.
-fn seed_demo(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
+fn seed_demo(db: &mut Db) -> Result<(), Box<dyn std::error::Error>> {
     let a_tolstoy = db.upsert_author("Толстой", Some("Лев"), Some("Николаевич"))?;
     let a_dostoevsky = db.upsert_author("Достоевский", Some("Фёдор"), Some("Михайлович"))?;
     let a_orwell = db.upsert_author("Orwell", Some("George"), None)?;

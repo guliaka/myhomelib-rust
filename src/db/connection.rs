@@ -11,6 +11,8 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use rusqlite::functions::FunctionFlags;
+use rusqlite::types::Value;
 use rusqlite::Connection;
 use tracing::info;
 
@@ -21,7 +23,8 @@ use crate::error::Result;
 const SCHEMA: &str = include_str!("../../schema/create_collection_db.sql");
 
 pub struct Db {
-    conn: Connection,
+    /// Crate-visible so the sibling `repository` module can issue queries.
+    pub(crate) conn: Connection,
     /// Mirrors the original `FTriggersEnabled`. When false, `MHL_TRIGGERS_ON()` returns 0 so the
     /// schema's search-column triggers become no-ops (a bulk-import speedup used in later phases).
     triggers_enabled: Arc<AtomicBool>,
@@ -88,41 +91,61 @@ fn register_mhl_affinities(conn: &Connection) {
 
     // MHL_UPPER / MHL_LOWER — NULL-propagating (matches SQLite function semantics and the original's
     // use on nullable columns like Books.Lang).
-    conn.create_function("MHL_UPPER", 1, true, |ctx| match ctx.get_value::<Option<String>>(0)? {
-        Some(s) => Ok(Some(search::upper(&s))),
-        None => Ok(None),
-    })
+    conn.create_scalar_function(
+        "MHL_UPPER",
+        1,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| match ctx.get::<Option<String>>(0)? {
+            Some(s) => Ok(Value::Text(search::upper(&s))),
+            None => Ok(Value::Null),
+        },
+    )
     .expect("register MHL_UPPER");
 
-    conn.create_function("MHL_LOWER", 1, true, |ctx| match ctx.get_value::<Option<String>>(0)? {
-        Some(s) => Ok(Some(search::lower(&s))),
-        None => Ok(None),
-    })
+    conn.create_scalar_function(
+        "MHL_LOWER",
+        1,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| match ctx.get::<Option<String>>(0)? {
+            Some(s) => Ok(Value::Text(search::lower(&s))),
+            None => Ok(Value::Null),
+        },
+    )
     .expect("register MHL_LOWER");
 
     // MHL_FULLNAME — SQLite overloads by arity: 3 args (preserved case) and 4 args (uppercased).
     // NULL name parts are treated as empty strings, matching the original's text16 wrapper.
-    conn.create_function("MHL_FULLNAME", 3, true, |ctx| {
-        let last = ctx.get_value::<Option<String>>(0)?.unwrap_or_default();
-        let first = ctx.get_value::<Option<String>>(1)?;
-        let middle = ctx.get_value::<Option<String>>(2)?;
-        Ok(Some(search::format_name(&last, first.as_deref(), middle.as_deref())))
-    })
+    conn.create_scalar_function(
+        "MHL_FULLNAME",
+        3,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            let last = ctx.get::<Option<String>>(0)?.unwrap_or_default();
+            let first = ctx.get::<Option<String>>(1)?;
+            let middle = ctx.get::<Option<String>>(2)?;
+            Ok(Value::Text(search::format_name(&last, first.as_deref(), middle.as_deref())))
+        },
+    )
     .expect("register MHL_FULLNAME/3");
 
-    conn.create_function("MHL_FULLNAME", 4, true, |ctx| {
-        let last = ctx.get_value::<Option<String>>(0)?.unwrap_or_default();
-        let first = ctx.get_value::<Option<String>>(1)?;
-        let middle = ctx.get_value::<Option<String>>(2)?;
-        // The 4th arg is the original's format flag (only ever passed as 1 by the triggers); accepted
-        // and currently ignored.
-        let _flag: Option<i64> = ctx.get_value(3)?;
-        Ok(Some(search::upper(&search::format_name(
-            &last,
-            first.as_deref(),
-            middle.as_deref(),
-        ))))
-    })
+    conn.create_scalar_function(
+        "MHL_FULLNAME",
+        4,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            let last = ctx.get::<Option<String>>(0)?.unwrap_or_default();
+            let first = ctx.get::<Option<String>>(1)?;
+            let middle = ctx.get::<Option<String>>(2)?;
+            // The 4th arg is the original's format flag (only ever passed as 1 by the triggers); accepted
+            // and currently ignored.
+            let _flag: Option<i64> = ctx.get(3)?;
+            Ok(Value::Text(search::upper(&search::format_name(
+                &last,
+                first.as_deref(),
+                middle.as_deref(),
+            ))))
+        },
+    )
     .expect("register MHL_FULLNAME/4");
 
     // NOTE: MHL_TRIGGERS_ON needs the shared enable-flag and is registered in register_triggers_on_fn.
@@ -132,8 +155,8 @@ fn register_mhl_affinities(conn: &Connection) {
 fn register_triggers_on_fn(db: &Db) {
     let flag = Arc::clone(&db.triggers_enabled);
     db.conn
-        .create_function("MHL_TRIGGERS_ON", 0, false, move |_ctx| {
-            Ok(Some(if flag.load(Ordering::SeqCst) { 1i64 } else { 0i64 }))
+        .create_scalar_function("MHL_TRIGGERS_ON", 0, FunctionFlags::SQLITE_UTF8, move |_ctx| {
+            Ok(Value::Integer(if flag.load(Ordering::SeqCst) { 1 } else { 0 }))
         })
         .expect("register MHL_TRIGGERS_ON");
 }

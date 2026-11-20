@@ -67,7 +67,7 @@ impl Db {
 
     /// Insert or return the existing author. The original has no unique constraint on authors, so
     /// dedup happens here on (Last, First, Middle). Returns the `AuthorID`.
-    pub fn upsert_author(&self, last: &str, first: Option<&str>, middle: Option<&str>) -> Result<i64> {
+    pub fn upsert_author(&mut self, last: &str, first: Option<&str>, middle: Option<&str>) -> Result<i64> {
         let existing: Option<i64> = self
             .conn
             .query_row(
@@ -111,7 +111,7 @@ impl Db {
     // ------------------------------------------------------------------ Series
 
     /// Insert or return the existing series (dedup on case-insensitive title). Returns `SeriesID`.
-    pub fn upsert_series(&self, title: &str) -> Result<i64> {
+    pub fn upsert_series(&mut self, title: &str) -> Result<i64> {
         let key = search::upper(title);
         let existing: Option<i64> = self
             .conn
@@ -146,7 +146,7 @@ impl Db {
     // ------------------------------------------------------------------ Genres
 
     /// Insert or replace a genre row (keyed by `genre_code`).
-    pub fn upsert_genre(&self, code: &str, parent: Option<&str>, fb2: Option<&str>, alias: &str) -> Result<()> {
+    pub fn upsert_genre(&mut self, code: &str, parent: Option<&str>, fb2: Option<&str>, alias: &str) -> Result<()> {
         self.conn.execute(
             "INSERT OR REPLACE INTO Genres (GenreCode, ParentCode, FB2Code, GenreAlias) VALUES (?1,?2,?3,?4)",
             params![code, parent, fb2, alias],
@@ -175,7 +175,7 @@ impl Db {
 
     /// Insert a book and its author/genre links atomically. Computes the seven `Search*` columns.
     /// Returns the new `BookID`.
-    pub fn insert_book(&self, b: &Book, author_ids: &[i64], genre_codes: &[&str]) -> Result<i64> {
+    pub fn insert_book(&mut self, b: &Book, author_ids: &[i64], genre_codes: &[&str]) -> Result<i64> {
         let s_title = search::upper(&b.title);
         let s_lang = b.lang.as_deref().map(search::upper);
         let s_folder = b.folder.as_deref().map(search::upper);

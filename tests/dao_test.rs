@@ -55,7 +55,7 @@ fn open_initializes_schema_and_is_idempotent() {
 #[test]
 fn upsert_author_dedups_and_sets_search_name() {
     let (_d, path) = temp_db();
-    let db = Db::open(&path).unwrap();
+    let mut db = Db::open(&path).unwrap();
     let id1 = db.upsert_author("Толстой", Some("Лев"), Some("Николаевич")).unwrap();
     let id2 = db.upsert_author("Толстой", Some("Лев"), Some("Николаевич")).unwrap();
     assert_eq!(id1, id2);
@@ -74,7 +74,7 @@ fn upsert_author_dedups_and_sets_search_name() {
 #[test]
 fn insert_book_populates_search_columns_and_links() {
     let (_d, path) = temp_db();
-    let db = Db::open(&path).unwrap();
+    let mut db = Db::open(&path).unwrap();
     let a = db.upsert_author("Толстой", Some("Лев"), None).unwrap();
     let b = make_book("Война и мир", "ru");
     let id = db.insert_book(&b, &[a], &["prose.classic"]).unwrap();
@@ -95,7 +95,7 @@ fn insert_book_populates_search_columns_and_links() {
 #[test]
 fn search_by_title_and_author_with_pagination() {
     let (_d, path) = temp_db();
-    let db = Db::open(&path).unwrap();
+    let mut db = Db::open(&path).unwrap();
     let a_tol = db.upsert_author("Толстой", Some("Лев"), None).unwrap();
     let a_dost = db.upsert_author("Достоевский", Some("Фёдор"), None).unwrap();
 
@@ -126,7 +126,7 @@ fn search_by_title_and_author_with_pagination() {
 #[test]
 fn soft_deleted_excluded_by_default() {
     let (_d, path) = temp_db();
-    let db = Db::open(&path).unwrap();
+    let mut db = Db::open(&path).unwrap();
     let a = db.upsert_author("X", None, None).unwrap();
 
     let visible = make_book("Visible", "en");

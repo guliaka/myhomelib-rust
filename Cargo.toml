@@ -7,7 +7,7 @@ license = "MIT"
 
 # Phase 1: data layer (core types + SQLite DAO). GUI/FB2/import/Librusec land in later phases.
 [dependencies]
-rusqlite = "0.31"
+rusqlite = { version = "0.31", features = ["functions", "collation"] }
 thiserror = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
