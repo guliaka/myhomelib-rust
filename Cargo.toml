@@ -1,0 +1,31 @@
+[package]
+name = "myhomelib"
+version = "0.1.0"
+edition = "2021"
+description = "MyHomeLib — home e-book library manager (Rust rewrite of the FreePascal/Lazarus original)"
+license = "MIT"
+
+# Phase 1: data layer (core types + SQLite DAO). GUI/FB2/import/Librusec land in later phases.
+[dependencies]
+rusqlite = "0.31"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+# Default: compile SQLite from source (libsqlite3-sys "bundled") so the release build is a single
+# self-contained binary with no system dependency — required for the Windows 10 target.
+# On dev machines without a C compiler you can build/test against the OS SQLite instead:
+#   cargo test --no-default-features
+default = ["bundled"]
+bundled = ["rusqlite/bundled"]
+
+[profile.release]
+# Single self-contained Windows .exe is the end goal; keep it lean.
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
