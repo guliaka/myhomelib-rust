@@ -304,18 +304,37 @@ pub fn render(ctx: &egui::Context, state: &mut State, icons: &mut IconCache) {
             .default_width(260.)
             .min_width(160.)
             .show(ctx, |ui| {
-                let nodes = state.tree_nodes();
+                // Virtualized like the book grid: only the visible nodes are laid out, straight from
+                // the cached slice — a library can have hundreds of thousands of authors.
+                let current = state.selection.clone();
+                let mut clicked: Option<Selection> = None;
+                let nodes = state.tree();
                 if nodes.is_empty() {
                     ui.label(RichText::new("(пусто)").weak());
                 } else {
-                    ScrollArea::vertical().show(ui, |ui| {
-                        for node in nodes.iter() {
-                            let is_sel = node.selection == state.selection;
-                            if ui.selectable_label(is_sel, format!("{}  ({})", node.label, node.count)).clicked() {
-                                state.select(node.selection.clone());
+                    let row_h = ui.spacing().interact_size.y;
+                    ScrollArea::vertical().auto_shrink([false, false]).show_rows(ui, row_h, nodes.len(), |ui, range| {
+                        for node in &nodes[range] {
+                            let is_sel = node.selection == current;
+                            let label = format!("{}  ({})", node.label, node.count);
+                            // Full-width, left-aligned row (add_sized would centre the text).
+                            let layout = egui::Layout::left_to_right(egui::Align::Center)
+                                .with_main_justify(true)
+                                .with_main_align(egui::Align::Min);
+                            let resp = ui
+                                .allocate_ui_with_layout(egui::vec2(ui.available_width(), row_h), layout, |ui| {
+                                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                                    ui.add(egui::SelectableLabel::new(is_sel, label))
+                                })
+                                .inner;
+                            if resp.clicked() {
+                                clicked = Some(node.selection.clone());
                             }
                         }
                     });
+                }
+                if let Some(sel) = clicked {
+                    state.select(sel);
                 }
             });
     }

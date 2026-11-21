@@ -365,8 +365,13 @@ impl Db {
         }
         let ph: Vec<String> = (0..book_ids.len()).map(|i| format!("?{}", i + 1)).collect();
         let sql = format!(
-            "SELECT BookID, GROUP_CONCAT(GenreCode, ', ') FROM Genre_List \
-             WHERE BookID IN ({}) GROUP BY BookID",
+            // Display names, not codes: the link holds either the catalog's universal code or (for
+            // codes the catalog doesn't know) the raw FB2 code, which is then shown as-is.
+            "SELECT gl.BookID, GROUP_CONCAT(COALESCE(\
+                (SELECT g.GenreAlias FROM Genres g WHERE g.GenreCode = gl.GenreCode), \
+                (SELECT g.GenreAlias FROM Genres g WHERE g.FB2Code = gl.GenreCode LIMIT 1), \
+                gl.GenreCode), ', ') \
+             FROM Genre_List gl WHERE gl.BookID IN ({}) GROUP BY gl.BookID",
             ph.join(", ")
         );
         let mut stmt = self.conn.prepare(&sql)?;
@@ -479,7 +484,7 @@ impl Db {
     /// Authors that have books: `(AuthorID, display name, book count)`, sorted by name.
     pub fn list_author_nodes(&self) -> Result<Vec<(i64, String, i64)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT au.AuthorID, MHL_FULLNAME(au.LastName, au.FirstName, au.MiddleName, 0), COUNT(al.BookID) \
+            "SELECT au.AuthorID, MHL_FULLNAME(au.LastName, au.FirstName, au.MiddleName), COUNT(al.BookID) \
              FROM Authors au JOIN Author_List al ON al.AuthorID = au.AuthorID \
              GROUP BY au.AuthorID ORDER BY 2 COLLATE MHL_SYSTEM_NOCASE",
         )?;

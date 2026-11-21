@@ -340,10 +340,21 @@ impl State {
     /// over the whole collection, so each tab builds once (and again after any data mutation), never
     /// per-frame. Re-visiting a tab returns its cache instantly.
     pub fn tree_nodes(&mut self) -> Vec<TreeNode> {
+        self.tree().to_vec()
+    }
+
+    /// The active tab's left-panel nodes, built on first use and then borrowed from the cache. The view
+    /// renders from this slice (only the visible rows), so a tab with hundreds of thousands of authors
+    /// costs nothing per frame — no clone, no per-node layout.
+    pub fn tree(&mut self) -> &[TreeNode] {
         let t = self.tab.min(TABS.len() - 1);
-        if self.tree_built[t] {
-            return self.tree_cache[t].clone();
+        if !self.tree_built[t] {
+            self.build_tree(t);
         }
+        &self.tree_cache[t]
+    }
+
+    fn build_tree(&mut self, t: usize) {
         let mut out = Vec::new();
         match t {
             0 => { // Авторы
@@ -382,8 +393,7 @@ impl State {
             _ => {} // Поиск (3) and Список загрузок (5) have no left tree
         }
         self.tree_built[t] = true;
-        self.tree_cache[t] = out.clone();
-        out
+        self.tree_cache[t] = out;
     }
 
     /// Select a book (by stable id) for the detail panel.
