@@ -63,7 +63,9 @@ pub fn now_string() -> String {
     Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string()
 }
 
-/// The same format for a calendar date at midnight (INPX `DATE` fields).
+/// A calendar date as the original stores it. Its `DateTimeToStr` drops the time part when it is
+/// midnight, so INPX `DATE` fields end up as plain `yyyy-mm-dd` (verified against a collection
+/// written by the original).
 pub fn date_string(year: i32, month: u32, day: u32) -> String {
-    format!("{year:04}-{month:02}-{day:02} 00:00:00.000")
+    format!("{year:04}-{month:02}-{day:02}")
 }

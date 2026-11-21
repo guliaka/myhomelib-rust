@@ -233,15 +233,16 @@ pub(crate) fn register_mhl_affinities(conn: &Connection) {
     conn.create_collation("MHL_SYSTEM_NOCASE", |a, b| a.to_lowercase().cmp(&b.to_lowercase()))
         .expect("register MHL_SYSTEM_NOCASE");
 
-    // MHL_UPPER / MHL_LOWER — NULL-propagating (matches SQLite function semantics and the original's
-    // use on nullable columns like Books.Lang).
+    // MHL_UPPER / MHL_LOWER. NULL yields '' — the original reads its argument as text, which turns
+    // NULL into an empty string, so its `Search*` columns are never NULL (verified against a
+    // collection written by the original).
     conn.create_scalar_function(
         "MHL_UPPER",
         1,
         FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
         |ctx| match ctx.get::<Option<String>>(0)? {
             Some(s) => Ok(Value::Text(search::upper(&s))),
-            None => Ok(Value::Null),
+            None => Ok(Value::Text(String::new())),
         },
     )
     .expect("register MHL_UPPER");
@@ -252,7 +253,7 @@ pub(crate) fn register_mhl_affinities(conn: &Connection) {
         FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
         |ctx| match ctx.get::<Option<String>>(0)? {
             Some(s) => Ok(Value::Text(search::lower(&s))),
-            None => Ok(Value::Null),
+            None => Ok(Value::Text(String::new())),
         },
     )
     .expect("register MHL_LOWER");

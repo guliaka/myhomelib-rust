@@ -272,13 +272,14 @@ impl Db {
     pub fn insert_books_bulk(&mut self, books: &[Book]) -> Result<usize> {
         let tx = self.conn.transaction()?;
         for b in books {
+            let up = |v: Option<&str>| v.map(search::upper).unwrap_or_default();
             let s_title = search::upper(&b.title);
-            let s_lang = b.lang.as_deref().map(search::upper);
-            let s_folder = b.folder.as_deref().map(search::upper);
+            let s_lang = up(b.lang.as_deref());
+            let s_folder = up(b.folder.as_deref());
             let s_file = search::upper(&b.file_name);
-            let s_ext = b.ext.as_deref().map(search::upper);
-            let s_kw = b.key_words.as_deref().map(search::upper);
-            let s_ann = b.annotation.as_deref().map(search::upper);
+            let s_ext = up(b.ext.as_deref());
+            let s_kw = up(b.key_words.as_deref());
+            let s_ann = up(b.annotation.as_deref());
             tx.execute(
                 "INSERT INTO Books (LibID, Title, SeriesID, SeqNumber, UpdateDate, LibRate, Lang, Folder, \
                  FileName, InsideNo, Ext, BookSize, IsLocal, IsDeleted, KeyWords, Rate, Progress, Annotation, Review, \
@@ -613,13 +614,15 @@ impl Db {
 /// Insert one book row + its links on `conn` (no transaction management). Statements are cached, so
 /// the bulk importers pay the prepare cost once.
 fn insert_book_on(conn: &rusqlite::Connection, b: &Book, author_ids: &[i64], genre_codes: &[&str]) -> Result<i64> {
+    // Like MHL_UPPER: a NULL source gives '' in the search column, never NULL.
+    let up = |v: Option<&str>| v.map(search::upper).unwrap_or_default();
     let s_title = search::upper(&b.title);
-    let s_lang = b.lang.as_deref().map(search::upper);
-    let s_folder = b.folder.as_deref().map(search::upper);
+    let s_lang = up(b.lang.as_deref());
+    let s_folder = up(b.folder.as_deref());
     let s_file = search::upper(&b.file_name);
-    let s_ext = b.ext.as_deref().map(search::upper);
-    let s_kw = b.key_words.as_deref().map(search::upper);
-    let s_ann = b.annotation.as_deref().map(search::upper);
+    let s_ext = up(b.ext.as_deref());
+    let s_kw = up(b.key_words.as_deref());
+    let s_ann = up(b.annotation.as_deref());
 
     conn.prepare_cached(
         "INSERT INTO Books (\

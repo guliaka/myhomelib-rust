@@ -174,10 +174,23 @@ fn parse_record(line: &str, fields: &[Field]) -> std::result::Result<InpRecord, 
         match field {
             Field::Author => {
                 for a in split_items(value) {
-                    let mut it = a.splitn(3, SUBITEM_DELIM);
-                    let last = it.next().unwrap_or("").to_string();
-                    let first = it.next().unwrap_or("").to_string();
-                    let middle = it.next().unwrap_or("").to_string();
+                    // The original cuts "up to the next comma" twice and takes what is left as the
+                    // middle name. With a comma missing, the cut yields '' and the text stays for the
+                    // next part: "Ср, 13 окт" → last «Ср», first '', middle «13 окт»; a name with no
+                    // comma at all ends up entirely in the middle name. Its property setters then
+                    // trim every part.
+                    let mut rest = a;
+                    let mut cut = || match rest.find(SUBITEM_DELIM) {
+                        Some(p) => {
+                            let head = &rest[..p];
+                            rest = &rest[p + 1..];
+                            head
+                        }
+                        None => "",
+                    };
+                    let last = cut().trim().to_string();
+                    let first = cut().trim().to_string();
+                    let middle = rest.trim().to_string();
                     r.authors.push((last, first, middle));
                 }
             }
@@ -436,26 +449,27 @@ impl Caches {
         Ok(id)
     }
 
-    /// Resolve an INPX genre item to the code stored in `Genre_List`. With FB2 genres the FB2 code is
-    /// translated to the collection's universal code; a code the catalog doesn't know is kept as-is
-    /// (the views join the catalog by either code), and an empty one becomes the "unknown" genre.
+    /// Resolve an INPX genre item to the code stored in `Genre_List`, as the original's genre cache
+    /// does: an FB2 code is translated to the collection's universal code, a universal code must exist
+    /// in the catalog, and anything unrecognised (or empty) is filed under the "unknown" genre `0.0`.
     fn genre_code(&mut self, db: &Db, item: &str, fb2: bool) -> Result<String> {
         let key = item.trim().to_lowercase();
-        if key.is_empty() || key == UNKNOWN_GENRE_CODE {
-            if self.genre_codes.insert(UNKNOWN_GENRE_CODE.to_string()) {
-                db.connection().execute(
-                    "INSERT OR IGNORE INTO Genres (GenreCode, ParentCode, FB2Code, GenreAlias) VALUES (?1, '0', NULL, ?2)",
-                    params![UNKNOWN_GENRE_CODE, UNKNOWN_GENRE_ALIAS],
-                )?;
-            }
-            return Ok(UNKNOWN_GENRE_CODE.to_string());
+        let known = if fb2 {
+            self.genre_by_fb2.get(&key).cloned()
+        } else {
+            self.genre_codes.contains(&key).then(|| item.trim().to_string())
+        };
+        if let Some(code) = known {
+            return Ok(code);
         }
-        if fb2 {
-            if let Some(code) = self.genre_by_fb2.get(&key) {
-                return Ok(code.clone());
-            }
+        // A custom genre list may lack the 0.0 row; make sure the link has a catalog entry.
+        if self.genre_codes.insert(UNKNOWN_GENRE_CODE.to_string()) {
+            db.connection().execute(
+                "INSERT OR IGNORE INTO Genres (GenreCode, ParentCode, FB2Code, GenreAlias) VALUES (?1, '0', NULL, ?2)",
+                params![UNKNOWN_GENRE_CODE, UNKNOWN_GENRE_ALIAS],
+            )?;
         }
-        Ok(item.trim().to_string())
+        Ok(UNKNOWN_GENRE_CODE.to_string())
     }
 }
 
@@ -655,7 +669,6 @@ fn insert_record(db: &Db, caches: &mut Caches, r: &InpRecord, is_local: bool, fb
         let seq = if r.seq_number > 5000 { 0 } else { r.seq_number };
         (Some(caches.series_id(db, &r.series)?), Some(seq))
     };
-    let opt = |s: &str| (!s.is_empty()).then(|| s.to_string());
     let book = Book {
         book_id: 0,
         lib_id: r.lib_id.clone(),
@@ -664,7 +677,8 @@ fn insert_record(db: &Db, caches: &mut Caches, r: &InpRecord, is_local: bool, fb
         seq_number,
         update_date: r.date.clone(),
         lib_rate: r.lib_rate,
-        lang: opt(&r.lang),
+        // The original binds these as strings, so an empty value is stored as '' rather than NULL.
+        lang: Some(r.lang.clone()),
         folder: Some(r.folder.clone()),
         file_name: r.file_name.clone(),
         inside_no: r.inside_no,
@@ -672,7 +686,7 @@ fn insert_record(db: &Db, caches: &mut Caches, r: &InpRecord, is_local: bool, fb
         book_size: Some(r.size),
         is_local,
         is_deleted: r.deleted,
-        key_words: opt(&r.key_words),
+        key_words: Some(r.key_words.clone()),
         rate: 0,
         progress: 0,
         annotation: None,
@@ -691,7 +705,7 @@ mod tests {
         let (fields, folder) = parse_structure("AUTHOR;GENRE;TITLE;SERIES;SERNO;FILE;SIZE;LIBID;DEL;EXT;DATE;LANG;LIBRATE;KEYWORDS;");
         assert_eq!(fields.len(), 14);
         assert!(!folder);
-        let line = "Толстой,Лев,Николаевич:Иванов,Иван,:\u{4}prose_classic:sf:\u{4}Война и мир\u{4}Эпопея\u{4}2\u{4}12345\u{4}777\u{4}12345\u{4}0\u{4}fb2\u{4}2011-03-05\u{4}ru\u{4}4\u{4}война, мир\u{4}";
+        let line = "Толстой,Лев,Николаевич:Иванов, Иван ,:\u{4}prose_classic:sf:\u{4}Война и мир\u{4}Эпопея\u{4}2\u{4}12345\u{4}777\u{4}12345\u{4}0\u{4}fb2\u{4}2011-03-05\u{4}ru\u{4}4\u{4}война, мир\u{4}";
         let r = parse_record(line, &fields).unwrap();
         assert_eq!(r.authors.len(), 2);
         assert_eq!(r.authors[0], ("Толстой".into(), "Лев".into(), "Николаевич".into()));
@@ -704,7 +718,7 @@ mod tests {
         assert_eq!(r.ext, ".fb2");
         assert_eq!(r.size, 777);
         assert!(!r.deleted);
-        assert_eq!(r.date, "2011-03-05 00:00:00.000");
+        assert_eq!(r.date, "2011-03-05");
         assert_eq!(r.lang, "ru");
         assert_eq!(r.lib_rate, 4);
         assert_eq!(r.key_words, "война, мир");
@@ -719,9 +733,14 @@ mod tests {
         assert_eq!(r.genres, vec![UNKNOWN_GENRE_CODE]);
         assert_eq!(r.title, NO_TITLE);
         assert!(r.deleted);
-        assert_eq!(r.date, "1970-01-01 00:00:00.000");
+        assert_eq!(r.date, "1970-01-01");
         // A malformed date is a structure error, not a panic.
         assert!(parse_record("a,b,c:\u{4}g:\u{4}t\u{4}\u{4}\u{4}f\u{4}1\u{4}1\u{4}0\u{4}fb2\u{4}20x1-aa\u{4}", &fields).is_err());
+        // Author quirks of the original's parser: one comma → the rest is the middle name; no comma →
+        // everything is the middle name and the last name becomes "unknown".
+        let r = parse_record("Ср, 13 окт:Одиночка:\u{4}g:\u{4}t", &fields).unwrap();
+        assert_eq!(r.authors[0], ("Ср".to_string(), String::new(), "13 окт".to_string()));
+        assert_eq!(r.authors[1], (UNKNOWN_AUTHOR.to_string(), String::new(), "Одиночка".to_string()));
         // Short line: missing trailing fields are simply absent.
         let r = parse_record("a,b,c:\u{4}g:\u{4}t", &fields).unwrap();
         assert_eq!(r.title, "t");

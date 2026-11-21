@@ -198,24 +198,35 @@ original's view/collection toggles and show their tooltip until ported. Headless
 placeholder per icon since `image` is gui-only. *Known delta:* egui draws flat widgets, so the toolbar/menu can't
 be pixel-identical to beveled native Win32 controls — this is the closest achievable in pure egui.
 
-### D16 — INPX import = faithful port of `TImportInpxThread`, with three deliberate deltas
+### D16 — INPX import = faithful port of `TImportInpxThread`, checked row-for-row against the original
 `inpx.rs` follows the original record for record: `structure.info` field order (default structure when
 absent), `Chr(4)` / `:` / `,` delimiters, `Normalize` (missing title → «Без названия», missing author →
-«Неизвестный», missing genre → `0.0`), `DEL >= "1"`, `SeqNumber > 5000 → 0`, extension stored with its dot,
-date as `yyyy-mm-dd 00:00:00.000`; local collections get `Folder = <inp name>.zip` + `InsideNo = line
-index` unless the structure has `FOLDER`; online collections get the generated `Letter\Author\LibID
-Title.fb2.zip` location and skip nothing (`extra.inp` is local-skipped); `collection.info` /
-`version.info` set the notes / URL / script / data-version properties. Deltas:
-- **Idempotent.** The original inserts every record on every run, so importing the same INPX twice
-  doubles the collection. Here a record whose (folder, file, position) is already present is skipped —
-  re-running after a cancel, or importing a newer INPX, only adds what is new.
-- **Unknown FB2 genre codes are kept verbatim** in `Genre_List` instead of collapsing to `0.0`; the views
-  resolve a link by either the universal or the FB2 code, so nothing is lost when the catalog lacks a code.
-- **A list item without its terminating `:` is still read** (the original silently drops it).
+«Неизвестный», missing genre → `0.0`), `DEL >= "1"`, `SeqNumber > 5000 → 0`, extension stored with its dot;
+local collections get `Folder = <inp name>.zip` + `InsideNo = line index` unless the structure has
+`FOLDER`; online collections get the generated `Letter\Author\LibID Title.fb2.zip` location;
+`collection.info` / `version.info` set the notes / URL / script / data-version properties.
+
+**Verified against real data (D20):** the same Flibusta INPX (699,510 records, 217 `.inp`) was imported
+here and compared with the collection the original built from it. Details the comparison forced:
+dates are stored as plain `yyyy-mm-dd`; empty `Lang` is `''`, not NULL; author name parts are trimmed,
+and a name with a missing comma shifts into the *middle* name exactly as the original's cut-twice
+parser does; an FB2 genre code the catalog doesn't know is filed under `0.0`.
+
+Deliberate deltas (each one visible in the comparison):
+- **Idempotent.** The original inserts every record on every run, so importing an INPX twice doubles
+  the collection. Here a record whose (folder, file, position) is already present is skipped.
+- **Keywords are imported.** The original's field-list parser only takes names *followed by* `;`, so
+  with the default structure (which doesn't end in `;`) the last field, `KEYWORDS`, is silently
+  dropped — 188,924 books in the test library have keywords the original never stored.
+- **`SERNO` with stray spaces is still a number** (`" 03 "` → 3; the original stores 0). 2 records.
+- **A list item without its terminating `:` is still read** (the original drops it).
+Known non-match: the original compares names through the Windows collation, which treats soft hyphens
+and composed/decomposed letters (`ё`, `й`) as equal, so it reuses one row where this port creates a
+second — 3 extra authors and 3 extra series out of 170k / 74k in the test library.
+
 Speed: ids for authors / series / genres come from in-memory maps, one transaction per `.inp`, schema
 triggers off (the DAO writes the `Search*` columns itself), 256 MB page cache on the import connection.
-Measured on this box, synthetic 1M-record INPX (425k authors, 40k series): **167 s**, 765 MB file;
-re-import (all present) 3 s.
+Measured on this box: real Flibusta INPX, 699,510 books — **200 s**; synthetic 1M records — 167 s.
 
 ### D17 — System database = the original's `user.dbs2`, schema verbatim
 `sysdb.rs` ports the registry half of `TSystemData_SQLite`: `Bases` create / register / update / delete
@@ -244,6 +255,18 @@ names from `Authors`, joined and sorted in Rust (6.5 s → 0.5 s at 425k authors
 names are shown in display case (the 4-argument `MHL_FULLNAME` always upper-cases — it is the
 `SearchName` form), and the grid's Жанр column shows genre names instead of codes.
 
+### D20 — Fidelity is measured against a collection written by the original
+`/home/hermes/inpx` holds a real INPX, collections the original built from it, and book archives. The
+original's `.hlc2` opens unchanged (CLI stats and the windowed app: 586,429 visible books, trees, grid).
+Importing the same INPX and diffing all 699,510 books field by field — every `Books` column including
+the seven `Search*` ones, plus each book's authors (with `SearchName`), series and genre links — leaves
+only the deltas listed in D16 and 27 rows of the user's own reading progress. What the diff changed:
+- **Genre catalog** is now the original's `genres_fb2` list (317 rows, recovered from that collection's
+  `Genres` table), replacing the hand-made 79-row list. Genre links match exactly (1,111,334).
+- **`MHL_UPPER` / `Search*`**: NULL gives `''`, never NULL; upper-casing is one character to one
+  character like the Windows API (`ß`, `ı`, `ς`, Georgian stay as they are; a leading BOM is dropped).
+Not replicated: Windows collation equivalences (see D16).
+
 ---
 
 ## Faithful behavior recovered from the original source
@@ -262,7 +285,7 @@ These were read from the FreePascal source, not guessed — implementers should 
 
 - **Built-in FB2 genre tree** — **resolved in Phase 5.** A standard FB2 tree is embedded
   (`assets/fb2_genres.txt`) and seeded on every new collection (D10); `myhomelib genres <db> --seed` re-applies
-  it and `--file <path>` replaces it with a custom list. Import links each book's raw `<genre>` code into
+  it and `--file <path>` replaces it with a custom list. *(Since D20 the embedded list is the original's.)* Import links each book's raw `<genre>` code into
   `Genre_List`; the catalog is left-joined for aliases by either `GenreCode` or `FB2Code`. *Open: the embedded
   list is a standard FB2 set — swap in the original's exact shipped file via `--file` if byte-parity with an
   existing install matters.*
@@ -338,6 +361,7 @@ These were read from the FreePascal source, not guessed — implementers should 
 - **INPX import, system DB, background jobs, tree virtualization (D16–D19, on `fable-t1`)** — `cargo test`
   green: 46 tests (8 lib unit, 5 new INPX/system-DB integration, GUI suite now 8 incl. a background import
   driven through the progress page), `cargo build` and `cargo build --features gui` clean, no warnings.
-  CLI e2e on a synthetic 1M-record INPX: `collections create … --inpx` → 1,000,000 books in 167 s, re-import
+  Real Flibusta INPX (699,510 records) imports in 200 s with 0 errors and matches the original's own
+  collection field by field apart from the documented deltas (D20). CLI e2e on a synthetic 1M-record INPX: `collections create … --inpx` → 1,000,000 books in 167 s, re-import
   adds 0. The windowed binary was run against that collection under Xvfb (software GL) and screenshotted:
   tree and grid populated, genre names resolved. Still not run on Windows.

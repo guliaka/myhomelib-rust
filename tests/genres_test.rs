@@ -78,13 +78,17 @@ fn parse_genre_lines_format() {
 fn new_collection_is_seeded_with_builtin_genres() {
     let (db, dir) = temp_db();
     let genres = db.list_genres().unwrap();
-    assert!(genres.len() > 50, "built-in tree should be seeded, got {}", genres.len());
+    // The original's genres_fb2 list: 317 rows, including the "unknown" genre 0.0.
+    assert_eq!(genres.len(), 317);
+    assert!(genres.iter().any(|g| g.genre_code == "0.0" && g.genre_alias == "Неотсортированное"));
 
-    // A known leaf: fb2 code "sf" -> "Научная фантастика".
+    // A known leaf, with the original's code: fb2 "sf" -> 0.1.11 "Научная фантастика" under 0.1 «Фантастика».
     let sf = genres.iter().find(|g| g.fb2_code.as_deref() == Some("sf")).unwrap();
-    assert_eq!(sf.genre_code, "0.1.1.5.2");
+    assert_eq!(sf.genre_code, "0.1.11");
     assert_eq!(sf.genre_alias, "Научная фантастика");
-    assert_eq!(sf.parent_code.as_deref(), Some("0.1.1.5"));
+    assert_eq!(sf.parent_code.as_deref(), Some("0.1"));
+    let root = genres.iter().find(|g| g.genre_code == "0.1").unwrap();
+    assert_eq!((root.genre_alias.as_str(), root.fb2_code.as_deref()), ("Фантастика", None));
 
     drop(db);
     let _ = std::fs::remove_dir_all(&dir);

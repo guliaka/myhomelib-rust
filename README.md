@@ -4,8 +4,8 @@ Rust rewrite of [MyHomeLib](https://github.com/guliaka/MyHomeLib.git) — a home
 manager (FreePascal/Lazarus original). Caters to FB2/FBD collections and Librusec-based libraries.
 
 **Status: in progress — roughly a third of the original's functionality.** Working: the data layer
-(opens existing collections unchanged), the FB2/FBD engine, folder import, **INPX import** (builds a
-1M-book collection from an index in ~3 min), the **system database** (collection registry + groups), the
+(opens existing collections unchanged), the FB2/FBD engine, folder import, **INPX import** (a real 700k-book
+Flibusta index imports in ~3.5 min and matches the original's own collection field by field), the **system database** (collection registry + groups), the
 egui window (six tabs, virtualized grid *and* tree, background imports with a progress page), search,
 statistics, and the Librusec script engine. Not yet ported: opening books in a reader, multi-collection UI
 and the new-collection wizard, ratings/groups/reviews, editing dialogs, export to device, most view

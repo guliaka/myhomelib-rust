@@ -91,7 +91,7 @@ fn inpx_import_builds_a_local_collection() {
     assert_eq!(folder, "fb2-000100-000102.zip");
     assert_eq!(inside, 2);
     assert_eq!(ext, ".fb2");
-    assert_eq!(date, "2012-01-15 00:00:00.000");
+    assert_eq!(date, "2012-01-15");
     assert_eq!((local, deleted), (1, 0));
     assert_eq!(title, "Двенадцать стульев");
 
@@ -111,16 +111,25 @@ fn inpx_import_builds_a_local_collection() {
     let no_series: Option<i64> = conn.query_row("SELECT SeriesID FROM Books WHERE FileName='101'", [], |r| r.get(0)).unwrap();
     assert_eq!(no_series, None);
 
-    // FB2 genre code translated to the catalog's universal code; an unknown code is kept verbatim.
+    // FB2 genre code translated to the catalog's universal code; an unknown code is filed under 0.0.
     let classic: String = conn.query_row("SELECT GenreCode FROM Genres WHERE FB2Code='prose_classic'", [], |r| r.get(0)).unwrap();
     let g100: String = conn
         .query_row("SELECT gl.GenreCode FROM Genre_List gl JOIN Books b ON b.BookID=gl.BookID WHERE b.FileName='100'", [], |r| r.get(0))
         .unwrap();
     assert_eq!(g100, classic);
-    let unknown: i64 = conn
-        .query_row("SELECT COUNT(*) FROM Genre_List WHERE GenreCode='no_such_genre'", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(unknown, 1);
+    let g102: Vec<String> = {
+        let mut st = conn
+            .prepare("SELECT gl.GenreCode FROM Genre_List gl JOIN Books b ON b.BookID=gl.BookID WHERE b.FileName='102' ORDER BY 1")
+            .unwrap();
+        let v = st.query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
+        v
+    };
+    let humor: String = conn.query_row("SELECT GenreCode FROM Genres WHERE FB2Code='humor'", [], |r| r.get(0)).unwrap();
+    assert_eq!(g102, vec!["0.0".to_string(), humor]);
+    // Empty Lang / KeyWords are stored as '' like the original does, not NULL.
+    let (lang, kw): (String, String) =
+        conn.query_row("SELECT Lang, KeyWords FROM Books WHERE FileName='201'", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+    assert_eq!((lang.as_str(), kw.as_str()), ("", ""));
 
     // The record with nothing but a file: normalized author/title/genre.
     let (t201, g201): (String, String) = conn
