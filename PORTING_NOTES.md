@@ -151,6 +151,20 @@ authors/genres/series/folders. Large folders briefly block the UI while they imp
 would need either a second connection or chunked frames (the shared connection can't move to a worker thread) —
 deferred as a follow-up.
 
+### D14 — GUI = full structural match of the original (6-tab shell, menu bar, toolbar), on `devel`
+The user wanted the Rust GUI to look like the original Delphi app, so on the `devel` branch the window was
+restructured to mirror `Program/Forms/frm_main.dfm`: a classic light-gray Win32-style theme (egui draws its own
+flat widgets and can't render beveled native controls, so this is the closest achievable approximation), a
+TMainMenu-style menu bar (Книга / Коллекция / Группа / Редактирование / Вид / Инструменты / Помощь), an icon
+toolbar of the key actions, and the original's six page-control tabs (Авторы / Серии / Жанры / Поиск / Группы /
+Список загрузок). `state.tab` is now the main page-control tab (0-5): each category tab shows its own left tree +
+a virtualized multi-column book grid (Название / № / Размер / Рейтинг / Добавлено, added-date from
+`Books.update_date`); Поиск hosts the multi-field search form + results; Список загрузок shows the download queue.
+A bottom info band (the original's TInfoPanel) shows the selected book's details + genres; a TStatusBar sits at the
+very bottom. Virtualization is unchanged — only the visible slice is ever materialized, so 1M+ libraries stay fast.
+*Known delta:* «Группы» currently shows the folder tree (the original's user-defined groups aren't ported; folders
+are the closest existing organization).
+
 ---
 
 ## Faithful behavior recovered from the original source
@@ -226,3 +240,11 @@ These were read from the FreePascal source, not guessed — implementers should 
   the list total (D13). New headless test `import_dir_refreshes_state` covers import → view refresh → dedupe on
   re-import → rebuilt author tree. `cargo test` green (34 total: gui suite now 7), `cargo build --features gui`
   clean, no warnings on either feature set.
+- **GUI structural rework (D14, on `devel`)** — Rebuilt the window to match the original's layout: classic
+  light-gray theme (G1), multi-column virtualized book grid + bottom info band (G2), menu bar + icon toolbar +
+  six-tab page-control shell with per-tab content and a dedicated download-queue tab (G3), and the original's
+  book-grid columns with genres in the info band (G4). `state.tab` is now the main tab (0-5) with per-tab helpers
+  + a clean-slate reset on switch. The navigation test was updated to the new tab order, and the headless render
+  smoke test now walks all six tabs (menu/toolbar/tab-bar/nav/search/downloads paths) without panic. `cargo test`
+  green (34 total), `cargo build` and `cargo build --features gui` clean with no warnings on either feature set.
+  Visual verification on a real Windows box is still pending (headless here).
