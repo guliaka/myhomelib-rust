@@ -1,0 +1,61 @@
+name: Windows build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Cache cargo + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: win-cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+
+      # One build produces both binaries (the `gui` feature enables eframe and the GUI bin).
+      - name: Build (release, CLI + GUI)
+        run: cargo build --release --features gui
+
+      - name: Collect binaries
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target/release/myhomelib.exe dist/
+          Copy-Item target/release/myhomelib-gui.exe dist/
+          Get-ChildItem dist | Format-Table Name, @{N='KB';E={[math]::Round($_.Length/1KB)}}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: myhomelib-windows-x86_64
+          path: dist/*.exe
+          if-no-files-found: error
+
+      # Stable-tagged release -> permanent download URL that always points at the newest build.
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: windows-x86_64
+          name: Windows x86_64 (latest)
+          files: |
+            dist/myhomelib.exe
+            dist/myhomelib-gui.exe
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
