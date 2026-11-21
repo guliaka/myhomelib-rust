@@ -620,7 +620,7 @@ fn render_book_grid(ui: &mut egui::Ui, state: &mut State) {
                     let (anchor_pos, anchor) = if c.center {
                         (cell.center(), Align2::CENTER_CENTER)
                     } else {
-                        (cell.min, Align2::LEFT_CENTER)
+                        (cell.left_center(), Align2::LEFT_CENTER)
                     };
                     ui.painter()
                         .with_clip_rect(cell)
@@ -686,7 +686,7 @@ fn render_book_row(ui: &mut egui::Ui, b: &Book, cols: &[GridCol], is_selected: b
             let (anchor_pos, anchor) = if c.center {
                 (cell.center(), Align2::CENTER_CENTER)
             } else {
-                (cell.min, Align2::LEFT_CENTER)
+                (cell.left_center(), Align2::LEFT_CENTER)
             };
             ui.painter()
                 .with_clip_rect(cell)
