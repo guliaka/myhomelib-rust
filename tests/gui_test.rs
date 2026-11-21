@@ -351,3 +351,65 @@ fn import_dir_refreshes_state() {
     drop(state);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Background INPX import driven the way the window drives it: start the job, keep rendering the
+/// progress page while it runs, acknowledge it, and see the views refreshed.
+#[test]
+fn inpx_import_job_shows_progress_and_refreshes_views() {
+    use std::io::Write;
+    let Fixture { db, dir, db_path, .. } = make_fixture();
+    let mut state = State::new(db, db_path.clone());
+    assert_eq!(state.total_books(), 3);
+
+    let d = '\u{4}';
+    let line = |author: &str, title: &str, file: &str| {
+        [author, "prose_classic:", title, "", "", file, "10", file, "0", "fb2", "2020-01-01", "ru", "", ""].join(&d.to_string())
+    };
+    let inp = [line("Булгаков,Михаил,:", "Мастер и Маргарита", "500"), line("Чехов,Антон,:", "Вишнёвый сад", "501")].join("\r\n");
+    let inpx = dir.join("lib.inpx");
+    let mut zw = zip::ZipWriter::new(std::fs::File::create(&inpx).unwrap());
+    zw.start_file("fb2-500-501.inp", zip::write::SimpleFileOptions::default()).unwrap();
+    zw.write_all(inp.as_bytes()).unwrap();
+    zw.finish().unwrap();
+
+    assert!(state.start_inpx_import(&inpx));
+    assert!(state.job_active());
+    // A second job is refused while one is active.
+    assert!(!state.start_inpx_import(&inpx));
+
+    // Render the progress page until the job finishes (bounded wait).
+    let ctx = egui::Context::default();
+    let mut icons = view::IconCache::default();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let _ = ctx.run(egui::RawInput::default(), |ctx| view::render(ctx, &mut state, &mut icons));
+        if state.job.as_ref().unwrap().is_done() {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "import job did not finish");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    // One more frame with the finished job (Close button + summary) must render too.
+    let _ = ctx.run(egui::RawInput::default(), |ctx| view::render(ctx, &mut state, &mut icons));
+
+    state.finish_job();
+    assert!(!state.job_active());
+    assert_eq!(state.status, "Добавлено 2 книг");
+    assert_eq!(state.total_books(), 5);
+    state.set_tab(0);
+    assert_eq!(state.tree_nodes().len(), 4, "authors: Толстой, Достоевский, Булгаков, Чехов");
+    // Back on the normal window.
+    let _ = ctx.run(egui::RawInput::default(), |ctx| view::render(ctx, &mut state, &mut icons));
+
+    // Folder import through the same job path.
+    let inbound = dir.join("inbound2");
+    std::fs::create_dir_all(&inbound).unwrap();
+    std::fs::write(inbound.join("master.fb2"), BULGAKOV_FB2).unwrap();
+    assert!(state.start_folder_import(&inbound));
+    state.job.as_mut().unwrap().join();
+    state.finish_job();
+    assert_eq!(state.total_books(), 6);
+
+    drop(state);
+    let _ = std::fs::remove_dir_all(&dir);
+}

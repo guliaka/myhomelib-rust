@@ -8,6 +8,8 @@ use std::sync::{Arc, Mutex};
 use crate::core::{Author, Book};
 use crate::db::{BookQuery, BookScope, Db};
 use crate::import::{Importer, ImportReport};
+use crate::inpx::{import_inpx, InpxOptions};
+use crate::jobs::Job;
 use crate::librusec::catalog::{Catalog, CatalogBook};
 use crate::librusec::queue::DownloadQueue;
 use crate::settings::Settings;
@@ -165,6 +167,10 @@ pub struct State {
     pub lib_pass: String,
     pub lib_url: String,
     pub lib_script: String,
+    /// The running (or just-finished, not yet acknowledged) background job — an import. While it is
+    /// set the view shows only the progress page, so the UI connection issues no queries that could
+    /// wait on the job's write lock.
+    pub job: Option<Job>,
 }
 
 impl State {
@@ -212,6 +218,7 @@ impl State {
             lib_pass,
             lib_url,
             lib_script,
+            job: None,
         };
         s.reload();
         s
@@ -415,6 +422,70 @@ impl State {
             report.errors.len()
         );
         Ok(report)
+    }
+
+    // ------------------------------------------------------------------ background jobs
+
+    /// True while a background job is set (running, or finished and waiting to be acknowledged).
+    pub fn job_active(&self) -> bool {
+        self.job.is_some()
+    }
+
+    /// Build/extend this collection from an INPX index on a background thread (its own connection).
+    /// Returns false — and reports why in the status bar — if another job is still active.
+    pub fn start_inpx_import(&mut self, inpx: &Path) -> bool {
+        if self.job_active() {
+            self.status = "Дождитесь завершения текущей операции".into();
+            return false;
+        }
+        let (db_path, inpx) = (self.db_path.clone(), inpx.to_path_buf());
+        let title = format!("Импорт INPX: {}", inpx.display());
+        self.job = Some(Job::spawn(title, move |p| {
+            let db = Db::open(&db_path)?;
+            Ok(import_inpx(&db, &inpx, &InpxOptions::default(), p)?.summary())
+        }));
+        true
+    }
+
+    /// Import every FB2/FBD file under `dir` on a background thread, so a large folder no longer
+    /// freezes the window. Same engine as [`Self::import_dir`].
+    pub fn start_folder_import(&mut self, dir: &Path) -> bool {
+        if self.job_active() {
+            self.status = "Дождитесь завершения текущей операции".into();
+            return false;
+        }
+        let (db_path, dir) = (self.db_path.clone(), dir.to_path_buf());
+        let title = format!("Импорт папки: {}", dir.display());
+        self.job = Some(Job::spawn(title, move |p| {
+            p.set_comment("Импорт файлов…");
+            let mut db = Db::open(&db_path)?;
+            let report = Importer::new(&mut db, &dir).import_dir(&dir)?;
+            for (path, e) in &report.errors {
+                p.error(format!("{}: {e}", path.display()));
+            }
+            p.set_percent(100.0);
+            Ok(format!("Добавлено {} книг, уже в коллекции: {}", report.imported, report.existing))
+        }));
+        true
+    }
+
+    /// Acknowledge a finished job: drop it, put its outcome in the status bar and refresh every view
+    /// (new books may add tree nodes and change counts). No-op while the job is still running.
+    pub fn finish_job(&mut self) {
+        if !self.job.as_ref().is_some_and(Job::is_done) {
+            return;
+        }
+        if let Some(mut job) = self.job.take() {
+            job.join();
+            self.status = match job.progress.result() {
+                Some(Ok(summary)) => summary,
+                Some(Err(e)) => format!("Ошибка: {e}"),
+                None => String::new(),
+            };
+        }
+        self.tree_built = [false; 6];
+        self.genre_win_key = None;
+        self.reload();
     }
 
     /// Total (non-deleted) book count, for the top bar.

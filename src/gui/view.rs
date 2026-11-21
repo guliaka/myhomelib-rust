@@ -19,12 +19,87 @@ use super::state::{author_display, Selection, State, TABS};
 /// show a dialog from, and tests must never block on one.
 #[cfg(feature = "gui")]
 fn do_import(state: &mut State) {
-    match pick_import_folder() {
-        Some(dir) => match state.import_dir(&dir) {
-            Ok(_) => {} // status is set by import_dir
-            Err(e) => state.status = format!("Import failed: {e}"),
-        },
-        None => {} // user cancelled the picker
+    // Runs as a background job with a progress page; `None` = the user cancelled the picker.
+    if let Some(dir) = pick_import_folder() {
+        state.start_folder_import(&dir);
+    }
+}
+
+/// «Импорт из INPX…» — pick an `.inpx` index and build the collection from it in the background.
+#[cfg(feature = "gui")]
+fn do_import_inpx(state: &mut State) {
+    let picked = rfd::FileDialog::new()
+        .set_title("Выберите файл INPX")
+        .add_filter("INPX", &["inpx"])
+        .pick_file();
+    if let Some(file) = picked {
+        state.start_inpx_import(&file);
+    }
+}
+
+#[cfg(not(feature = "gui"))]
+fn do_import_inpx(state: &mut State) {
+    state.status = "Импорт INPX: выбор файла доступен в оконной сборке".into();
+}
+
+/// The progress page shown instead of the main window while a background job is active (the
+/// original's modal progress form): comment, progress bar, error count, log tail, Stop / Close.
+fn render_job(ctx: &egui::Context, state: &mut State) {
+    let Some(job) = state.job.as_ref() else { return };
+    let done = job.is_done();
+    let progress = job.progress.clone();
+    let title = job.title.clone();
+    let mut close = false;
+    CentralPanel::default().show(ctx, |ui| {
+        ui.add_space(12.0);
+        ui.heading(title);
+        ui.add_space(8.0);
+        ui.label(progress.comment());
+        ui.add(ProgressBar::new((progress.percent() / 100.0) as f32).show_percentage());
+        let errors = progress.error_count();
+        if errors > 0 {
+            ui.colored_label(Color32::from_rgb(170, 0, 0), format!("Ошибок: {errors}"));
+        }
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if done {
+                if ui.button("Закрыть").clicked() {
+                    close = true;
+                }
+                match progress.result() {
+                    Some(Ok(summary)) => ui.label(summary),
+                    Some(Err(e)) => ui.colored_label(Color32::from_rgb(170, 0, 0), format!("Ошибка: {e}")),
+                    None => ui.label(""),
+                };
+            } else if progress.is_cancelled() {
+                ui.label("Останавливаем…");
+            } else if ui.button("Прервать").clicked() {
+                progress.cancel();
+            }
+        });
+        ui.separator();
+        let lines = progress.log_lines();
+        let row_h = ui.text_style_height(&egui::TextStyle::Body);
+        ScrollArea::vertical().stick_to_bottom(true).auto_shrink([false, false]).show_rows(
+            ui,
+            row_h,
+            lines.len(),
+            |ui, range| {
+                for l in &lines[range] {
+                    if l.severity == crate::jobs::Severity::Info {
+                        ui.label(&l.text);
+                    } else {
+                        ui.colored_label(Color32::from_rgb(170, 0, 0), &l.text);
+                    }
+                }
+            },
+        );
+    });
+    if close {
+        state.finish_job();
+    } else if !done {
+        // The job thread can't wake the UI; poll a few times a second while it runs.
+        ctx.request_repaint_after(std::time::Duration::from_millis(150));
     }
 }
 
@@ -163,6 +238,10 @@ fn icon_placeholder() -> egui::ColorImage {
 /// Render one frame of the main window from `state` (and its per-context icon cache).
 pub fn render(ctx: &egui::Context, state: &mut State, icons: &mut IconCache) {
     apply_classic_theme(ctx);
+    if state.job_active() {
+        render_job(ctx, state);
+        return;
+    }
     // Menu bar — the original's TMainMenu (Книга / Коллекция / Группа / Редактирование / Вид / Инструменты / Помощь).
     TopBottomPanel::top("menubar").show(ctx, |ui| {
         render_menu_bar(ui, state);
@@ -759,6 +838,10 @@ fn render_menu_bar(ui: &mut egui::Ui, state: &mut State) {
             }
         });
         ui.menu_button("Коллекция", |ui| {
+            if ui.button("Импорт из INPX…").clicked() {
+                ui.close_menu();
+                do_import_inpx(state);
+            }
             if ui.button("Статистика").clicked() {
                 state.show_stats = true;
             }
