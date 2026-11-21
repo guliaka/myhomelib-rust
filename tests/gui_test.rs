@@ -1,5 +1,6 @@
-//! Phase 4 acceptance: the GUI state/navigation logic (pure Rust) and a headless egui render smoke
-//! test. The windowed eframe runner is behind the `gui` feature and isn't exercised here (no display).
+//! GUI acceptance tests: navigation, multi-field search, statistics, settings persistence (all pure
+//! Rust), plus a headless egui render smoke test. The windowed eframe runner is behind the `gui`
+//! feature and isn't exercised here (no display).
 
 use myhomelib::core::Book;
 use myhomelib::db::Db;
@@ -34,6 +35,7 @@ fn book(title: &str, lang: &str, folder: Option<&str>) -> Book {
 struct Fixture {
     db: Db,
     dir: std::path::PathBuf,
+    db_path: std::path::PathBuf,
     tolstoy: i64,
     dostoevsky: i64,
     wiwar: i64,
@@ -48,7 +50,8 @@ fn make_fixture() -> Fixture {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
-    let mut db = Db::open(dir.join("gui.db")).unwrap();
+    let db_path = dir.join("gui.db");
+    let mut db = Db::open(db_path.clone()).unwrap();
     let tolstoy = db.upsert_author("Толстой", Some("Лев"), None).unwrap();
     let dostoevsky = db.upsert_author("Достоевский", Some("Фёдор"), None).unwrap();
     let wiwar = db.upsert_series("Война и мир").unwrap();
@@ -64,7 +67,7 @@ fn make_fixture() -> Fixture {
     let b3 = book("Преступление и наказание", "ru", Some("russian"));
     db.insert_book(&b3, &[dostoevsky], &["prose_classic"]).unwrap();
 
-    Fixture { db, dir, tolstoy, dostoevsky, wiwar }
+    Fixture { db, dir, db_path, tolstoy, dostoevsky, wiwar }
 }
 
 fn titles(state: &State) -> Vec<String> {
@@ -75,8 +78,8 @@ fn titles(state: &State) -> Vec<String> {
 
 #[test]
 fn navigation_by_author_genre_series_folder() {
-    let Fixture { db, dir, tolstoy, dostoevsky, wiwar } = make_fixture();
-    let mut state = State::new(db);
+    let Fixture { db, dir, db_path, tolstoy, dostoevsky, wiwar } = make_fixture();
+    let mut state = State::new(db, db_path.clone());
 
     // All books.
     assert_eq!(state.selection, Selection::All);
@@ -84,7 +87,7 @@ fn navigation_by_author_genre_series_folder() {
     assert_eq!(state.total_books(), 3);
 
     // Authors tab: two nodes with correct counts.
-    state.tab = 0;
+    state.set_tab(0);
     let authors = state.tree_nodes();
     assert_eq!(authors.len(), 2);
     let tolstoy_node = authors.iter().find(|n| matches!(&n.selection, Selection::Author(id) if *id == tolstoy)).unwrap();
@@ -95,7 +98,7 @@ fn navigation_by_author_genre_series_folder() {
     assert_eq!(titles(&state), vec!["Анна Каренина", "Война и мир"]);
 
     // Genres tab: one genre in use, all three books share it.
-    state.tab = 1;
+    state.set_tab(1);
     let genres = state.tree_nodes();
     assert_eq!(genres.len(), 1);
     assert!(matches!(&genres[0].selection, Selection::Genre(c) if c == "prose_classic"));
@@ -104,7 +107,7 @@ fn navigation_by_author_genre_series_folder() {
     assert_eq!(state.books.len(), 3);
 
     // Series tab: one series with a single book.
-    state.tab = 2;
+    state.set_tab(2);
     let series = state.tree_nodes();
     assert_eq!(series.len(), 1);
     assert_eq!(series[0].count, 1);
@@ -112,7 +115,7 @@ fn navigation_by_author_genre_series_folder() {
     assert_eq!(titles(&state), vec!["Война и мир"]);
 
     // Folders tab: root (1) + "russian" (2).
-    state.tab = 3;
+    state.set_tab(3);
     let folders = state.tree_nodes();
     assert_eq!(folders.len(), 2);
     state.select(Selection::Folder(Some("russian".into())));
@@ -127,26 +130,74 @@ fn navigation_by_author_genre_series_folder() {
 }
 
 #[test]
-fn search_filters_and_delete_removes() {
-    let Fixture { db, dir, .. } = make_fixture();
-    let mut state = State::new(db);
+fn search_filters_by_field() {
+    let Fixture { db, dir, db_path, .. } = make_fixture();
+    let mut state = State::new(db, db_path.clone());
 
-    // Search narrows the list.
-    state.select(Selection::All);
-    state.set_search("Анна");
+    // Author filter narrows to Толстой's two books.
+    state.filters.author = "Толстой".into();
+    state.reload();
+    assert_eq!(titles(&state), vec!["Анна Каренина", "Война и мир"]);
+
+    // Combined author + title → the single matching book.
+    state.filters.title = "Анна".into();
+    state.reload();
     assert_eq!(titles(&state), vec!["Анна Каренина"]);
 
-    // Clearing search returns to the tree selection (All).
-    state.set_search("");
+    // Language filter (exact) — all three are ru.
+    state.clear_search();
+    state.filters.lang = "ru".into();
+    state.reload();
     assert_eq!(state.books.len(), 3);
 
-    // Delete the selected book; it disappears from All and the count drops.
-    state.select(Selection::All);
-    let idx = state.books.iter().position(|b| b.title == "Анна Каренина").unwrap();
-    state.select_book(idx);
-    state.delete_selected_book();
-    assert_eq!(state.total_books(), 2);
-    assert!(!titles(&state).contains(&"Анна Каренина".to_string()));
+    // Extension filter (exact) — all fb2.
+    state.clear_search();
+    state.filters.ext = "fb2".into();
+    state.reload();
+    assert_eq!(state.books.len(), 3);
+
+    // Local-only — all local.
+    state.clear_search();
+    state.filters.only_local = true;
+    state.reload();
+    assert_eq!(state.books.len(), 3);
+
+    drop(state);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn stats_breakdowns() {
+    let Fixture { db, dir, db_path, .. } = make_fixture();
+    let state = State::new(db, db_path.clone());
+    let s = state.stats_data();
+    assert_eq!(s.books, 3);
+    assert_eq!(s.authors, 2); // Толстой, Достоевский
+    assert_eq!(s.series, 1); // one series catalog row
+    assert_eq!(s.genres, 1); // prose_classic (upserted by insert_book)
+    assert_eq!(s.by_lang, vec![("ru".to_string(), 3)]);
+    assert_eq!(s.by_ext, vec![("fb2".to_string(), 3)]);
+
+    drop(state);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn settings_roundtrip_ini() {
+    let Fixture { db, dir, db_path, .. } = make_fixture();
+    let mut state = State::new(db, db_path.clone());
+
+    // Set a reader association + active tab; both persist to `<db>.ini`.
+    state.reader_ext = "fb2".into();
+    state.reader_cmd = "/opt/reader %f".into();
+    state.apply_reader();
+    state.set_tab(2);
+
+    let ini_path = myhomelib::settings::Settings::path_for(&db_path);
+    assert!(ini_path.exists(), "settings should be written to <db>.ini");
+    let reloaded = myhomelib::settings::Settings::load(&db_path);
+    assert_eq!(reloaded.reader_for("fb2").as_deref(), Some("/opt/reader %f"));
+    assert_eq!(reloaded.active_tab(), 2);
 
     drop(state);
     let _ = std::fs::remove_dir_all(&dir);
@@ -154,16 +205,19 @@ fn search_filters_and_delete_removes() {
 
 #[test]
 fn render_smoke_headless() {
-    let Fixture { db, dir, .. } = make_fixture();
-    let mut state = State::new(db);
+    let Fixture { db, dir, db_path, .. } = make_fixture();
+    let mut state = State::new(db, db_path.clone());
 
     let ctx = egui::Context::default();
-    // Frame 1: default selection. Frame 2: a book selected (exercises the detail panel).
-    for frame in 0..2 {
-        let _ = ctx.run(egui::RawInput::default(), |ctx| view::render(ctx, &mut state)); // no panic
+    // Frame 1: default. Frame 2: a book selected (detail panel). Frame 3: stats dialog open.
+    for frame in 0..3 {
         if frame == 0 && !state.books.is_empty() {
             state.select_book(0);
         }
+        if frame == 2 {
+            state.show_stats = true;
+        }
+        let _ = ctx.run(egui::RawInput::default(), |ctx| view::render(ctx, &mut state)); // no panic
     }
 
     drop(state);

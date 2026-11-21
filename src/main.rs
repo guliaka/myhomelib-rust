@@ -33,6 +33,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some("books") => cmd_books(&args[1..]),
         Some("stats") => cmd_stats(&args[1..]),
         Some("import") => cmd_import(&args[1..]),
+        Some("genres") => cmd_genres(&args[1..]),
         Some("export") => cmd_export(&args[1..]),
         _ => {
             print_usage();
@@ -116,19 +117,73 @@ fn cmd_stats(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn cmd_import(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let path = args.first().ok_or("usage: myhomelib import <db-path> <dir>")?;
-    let dir = args.get(1).ok_or("usage: myhomelib import <db-path> <dir>")?.clone();
-    let mut db = Db::open(path)?;
-    let mut importer = Importer::new(&mut db, &dir);
+    let mut path = None;
+    let mut dir = None;
+    let mut register_genres = false;
+    for a in args {
+        match a.as_str() {
+            "--register-genres" => register_genres = true,
+            other => {
+                if path.is_none() {
+                    path = Some(other.to_string());
+                } else if dir.is_none() {
+                    dir = Some(other.to_string());
+                }
+            }
+        }
+    }
+    let path = path.ok_or("usage: myhomelib import <db-path> <dir> [--register-genres]")?;
+    let dir = dir.ok_or("usage: myhomelib import <db-path> <dir> [--register-genres]")?;
+    let mut db = Db::open(&path)?;
+    let mut importer = Importer::new(&mut db, &dir).with_register_genres(register_genres);
     let report = importer.import_dir(Path::new(&dir))?;
     println!(
-        "imported={} existing={} errors={}",
+        "imported={} existing={} errors={}{}",
         report.imported,
         report.existing,
-        report.errors.len()
+        report.errors.len(),
+        if register_genres { " (genres registered)" } else { "" }
     );
     for (p, e) in &report.errors {
         eprintln!("  error: {} — {e}", p.display());
+    }
+    Ok(())
+}
+
+fn cmd_genres(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut path = None;
+    let mut seed = false;
+    let mut file = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--seed" => seed = true,
+            "--file" => {
+                i += 1;
+                file = args.get(i).cloned();
+            }
+            other => path = Some(other.to_string()),
+        }
+        i += 1;
+    }
+    let path = path.ok_or("usage: myhomelib genres <db-path> [--seed | --file <path>]")?;
+    let mut db = Db::open(&path)?;
+
+    if let Some(f) = file {
+        let text = std::fs::read_to_string(&f).map_err(|e| format!("read {f}: {e}"))?;
+        let rows = myhomelib::genres::parse_genre_lines(&text);
+        let n = db.replace_genres(&rows)?;
+        println!("replaced genre catalog from {f}: {n} genres");
+    } else if seed {
+        let n = db.seed_builtin_genres()?;
+        println!("seeded built-in genre list: {n} genres");
+    } else {
+        let genres = db.list_genres()?;
+        println!("{} genre(s) in catalog:", genres.len());
+        for g in &genres {
+            let fb2 = g.fb2_code.as_deref().unwrap_or("-");
+            println!("  {}  [{}]  {}", g.genre_code, fb2, g.genre_alias);
+        }
     }
     Ok(())
 }
@@ -152,7 +207,8 @@ fn print_usage() {
          \x20 myhomelib init    <db-path> [--demo]\n\
          \x20 myhomelib books   <db-path> [--query Q] [--author A] [--limit N] [--offset M]\n\
          \x20 myhomelib stats   <db-path>\n\
-         \x20 myhomelib import  <db-path> <dir>\n\
+         \x20 myhomelib import  <db-path> <dir> [--register-genres]\n\
+         \x20 myhomelib genres  <db-path> [--seed | --file <path>]\n\
          \x20 myhomelib export  <db-path> <book-id> <out.fb2>"
     );
 }

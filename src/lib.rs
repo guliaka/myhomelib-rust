@@ -8,7 +8,9 @@ pub mod db;
 pub mod error;
 pub mod export;
 pub mod fb2;
+pub mod genres;
 pub mod gui;
 pub mod import;
+pub mod settings;
 
 pub use db::{BookQuery, CollectionStats, Db};

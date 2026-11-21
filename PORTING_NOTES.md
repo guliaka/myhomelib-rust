@@ -17,7 +17,7 @@ with a reason — nothing is dropped silently.
 | 2 | FB2/FBD engine (`fb2/`) | ✅ done | Lossless element-tree model (quick-xml parse, hand-rolled serialize), typed accessors (title/authors/genre/lang/annotation/cover), FBD = ZIP read/write. `cargo test` green incl. round-trip. |
 | 3 | Headless import/export (`import.rs`, `export.rs`) | ✅ done | Folder + FBD import (extract title/authors/genre/lang/series/annotation, dedupe by source-file identity), metadata export to FB2. INPX import, device export, and background threads/progress deferred to the GUI phases. `cargo test` green incl. import/export round-trip. |
 | 4 | GUI shell + tree navigation (egui) | ✅ done | egui main window: category tabs (Authors/Genres/Series/Folders) + node tree with counts, book list, detail panel, search box, soft-delete. State is pure Rust (headless-tested); view is pure egui; eframe runner behind the `gui` feature. Add/edit dialogs deferred to Phase 5. |
-| 5 | Search UI, settings, stats | ⬜ todo | Search presets, persisted settings, reader associations, statistics view. |
+| 5 | Search UI, settings, stats | ✅ done | Multi-field search (title/author/lang/ext/local-only), statistics dialog (totals + by-lang/by-ext breakdowns via in-use counts), settings persisted to `<db>.ini` (readers, active tab, window size) matching the original's `TMHLSettings`. Named search presets deferred. `cargo test` green incl. search/stats/settings round-trip. |
 | 6 | Librusec client + download queue (`librusec/`) | ⬜ todo | Remote browse/search, queued downloads with progress/cancel/resume. |
 | 7 | Polish + performance | ⬜ todo | Startup profiling (<10 s), lazy loading, Windows cross-build verified. |
 
@@ -75,6 +75,33 @@ boxes while still producing the native window on a display or the Windows target
 **0.31** — the version validated in the prior interactive run and the last release with the classic
 `.show(ctx, |ui| …)` panel API (0.37 reworked panels onto a `&mut Ui`).
 
+### D8 — Settings persist to an INI at `<db>.ini` (matching the original's `TMHLSettings`)
+The original (`unit_Settings.pas`) writes user settings to `DBFileName + '.ini'` with sections like
+`[Readers]` (extension → open command). We match that exactly: a minimal ordered INI reader/writer in
+`settings.rs` (no extra dependency) stores the same file, so an existing collection keeps its settings.
+Unknown sections/keys are preserved on load and re-emitted verbatim on save (forward-compatible with the
+original's richer file). Window size is read from the INI on launch; auto-save of a resized window is
+deferred — egui 0.31's viewport size isn't a stable proxy for the outer window, so persisting it per-frame
+would be wrong.
+
+### D9 — Statistics use "in-use" counts, not raw catalog row counts
+`State::stats_data()` reports distinct authors/series/genres **linked to non-deleted books** (via the
+`Author_List`, `Books.SeriesID`, and `Genre_List` link tables) rather than `COUNT(*)` on the catalog tables.
+This is more meaningful than raw catalog counts, which can include orphan rows or miss codes that exist only
+as links. The `Genres` catalog itself is populated by the embedded built-in FB2 tree on new collections (D10).
+
+### D10 — Genre catalog: embedded seed + reload/update + pull-from-FB2
+The original loads its genre list from a UTF-8 file (`TBookCollection.LoadGenres`, `ReloadGenres`); that data
+file is not committed to the repo, so we embed a standard FB2 tree (`assets/fb2_genres.txt`) in the same
+format and parse it with an exact port of the original's algorithm (`genres::parse_genre_lines`). Three paths:
+- **Seed on new collection** — `Db::open` seeds the built-in tree when it initializes a fresh schema (the
+  original's `CreateCollection` does the same); existing collections are never touched.
+- **Load/update** — `myhomelib genres <db> [--seed | --file <path>]`: `--seed` re-applies the built-in list
+  (idempotent upsert), `--file` replaces the whole catalog from a custom file and drops dangling links (the
+  original's `ReloadGenres`).
+- **Pull from FB2 on import** — `myhomelib import <db> <dir> --register-genres` also registers each book's
+  `<genre>` code in the catalog if missing, so the list grows to reflect imported books.
+
 ---
 
 ## Faithful behavior recovered from the original source
@@ -91,10 +118,12 @@ These were read from the FreePascal source, not guessed — implementers should 
 
 ## Known deltas / open questions (resolve or confirm per phase)
 
-- **Built-in FB2 genre tree** (`InternalLoadGenres` in the original) is **not yet ported**. Import now
-  populates `Genres` from each book's raw FB2 `<genre>` code (upserted by code), so a collection grows its
-  genres as books are imported — but a *fresh empty* collection still has none until something is imported.
-  *Action: embed the original's default-genre seed file (Phase 6 or a data file) for parity on new installs.*
+- **Built-in FB2 genre tree** — **resolved in Phase 5.** A standard FB2 tree is embedded
+  (`assets/fb2_genres.txt`) and seeded on every new collection (D10); `myhomelib genres <db> --seed` re-applies
+  it and `--file <path>` replaces it with a custom list. Import links each book's raw `<genre>` code into
+  `Genre_List`; the catalog is left-joined for aliases by either `GenreCode` or `FB2Code`. *Open: the embedded
+  list is a standard FB2 set — swap in the original's exact shipped file via `--file` if byte-parity with an
+  existing install matters.*
 - **`UpdateDate` format** is stored as a `VARCHAR(23)` string; kept verbatim for compatibility. Confirm
   the exact format string before any date re-formatting in the GUI (Phase 4/5).
 - **`Review` column** is a BLOB in the original (possibly non-UTF-8); carried as `Option<Vec<u8>>`.
@@ -120,3 +149,10 @@ These were read from the FreePascal source, not guessed — implementers should 
   and counts, search filtering, soft-delete removal, and a headless egui render smoke across two frames).
   The `gui` feature (eframe/winit) also builds + links on this box; the binary runs and exits cleanly with a
   "no display" error (expected headless). 17 tests green total.
+- **Phase 5** — `cargo test` (gui: multi-field search by author/title/lang/ext/local-only, statistics
+  breakdowns by language/extension + in-use totals, settings round-trip through `<db>.ini`, render smoke
+  opening the stats dialog; genres: file-format parsing, built-in seed on new collections, alias resolution,
+  replace-from-file with dangling-link cleanup, idempotent `register_genre_code`). CLI e2e verified:
+  `init` (seeds 79 genres) → `import --register-genres` (pulls a new genre into the catalog) → `genres`.
+  `cargo build --features gui` compiles clean. 24 tests green total (2 lib + 5 dao + 6 fb2 + 5 gui + 5 genres
+  + 1 import/export), no warnings.

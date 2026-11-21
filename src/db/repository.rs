@@ -173,6 +173,70 @@ impl Db {
 
     // ------------------------------------------------------------------ Books
 
+    /// Insert-or-replace a set of genre rows (idempotent "update": adds missing rows, refreshes
+    /// existing ones by `genre_code`). Returns the number of rows written.
+    pub fn upsert_genres(&mut self, rows: &[Genre]) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        for g in rows {
+            tx.execute(
+                "INSERT OR REPLACE INTO Genres (GenreCode, ParentCode, FB2Code, GenreAlias) VALUES (?1,?2,?3,?4)",
+                params![g.genre_code, g.parent_code, g.fb2_code, g.genre_alias],
+            )?;
+        }
+        tx.commit()?;
+        Ok(rows.len())
+    }
+
+    /// Replace the whole genre catalog from `rows` (mirrors the original `ReloadGenres`): clear
+    /// `Genres`, load the new set, then drop dangling `Genre_List` links whose code matches neither a
+    /// remaining `GenreCode` nor an `FB2Code`. Returns the number of rows written.
+    pub fn replace_genres(&mut self, rows: &[Genre]) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM Genres", [])?;
+        for g in rows {
+            tx.execute(
+                "INSERT INTO Genres (GenreCode, ParentCode, FB2Code, GenreAlias) VALUES (?1,?2,?3,?4)",
+                params![g.genre_code, g.parent_code, g.fb2_code, g.genre_alias],
+            )?;
+        }
+        tx.execute(
+            "DELETE FROM Genre_List WHERE GenreCode NOT IN (SELECT GenreCode FROM Genres) \
+             AND GenreCode NOT IN (SELECT FB2Code FROM Genres WHERE FB2Code IS NOT NULL)",
+            [],
+        )?;
+        tx.commit()?;
+        Ok(rows.len())
+    }
+
+    /// Seed the embedded built-in FB2 genre tree (idempotent upsert). Returns rows written.
+    pub fn seed_builtin_genres(&mut self) -> Result<usize> {
+        let rows = crate::genres::parse_genre_lines(crate::genres::BUILTIN_GENRES);
+        self.upsert_genres(&rows)
+    }
+
+    /// Ensure a genre exists for `code` (matched by `GenreCode` or `FB2Code`); insert it if missing.
+    /// Used by import `--register-genres` to grow the catalog from genres found in imported books.
+    /// Returns `true` when a new row was inserted.
+    pub fn register_genre_code(&mut self, code: &str) -> Result<bool> {
+        let trimmed = code.trim();
+        if trimmed.is_empty() {
+            return Ok(false);
+        }
+        let exists: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM Genres WHERE GenreCode = ?1 OR FB2Code = ?1",
+            params![trimmed],
+            |r| r.get(0),
+        )?;
+        if exists > 0 {
+            return Ok(false);
+        }
+        self.conn.execute(
+            "INSERT INTO Genres (GenreCode, ParentCode, FB2Code, GenreAlias) VALUES (?1, NULL, ?1, ?1)",
+            params![trimmed],
+        )?;
+        Ok(true)
+    }
+
     /// Insert a book and its author/genre links atomically. Computes the seven `Search*` columns.
     /// Returns the new `BookID`.
     pub fn insert_book(&mut self, b: &Book, author_ids: &[i64], genre_codes: &[&str]) -> Result<i64> {
@@ -301,6 +365,64 @@ impl Db {
         })
     }
 
+    /// Book counts per language code (non-deleted), most frequent first.
+    pub fn counts_by_lang(&self) -> Result<Vec<(String, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT Lang, COUNT(*) FROM Books WHERE IsDeleted = 0 AND Lang IS NOT NULL \
+             GROUP BY Lang ORDER BY 2 DESC, 1 COLLATE MHL_SYSTEM_NOCASE",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get(1)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Book counts per file extension (non-deleted), most frequent first.
+    pub fn counts_by_ext(&self) -> Result<Vec<(String, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT Ext, COUNT(*) FROM Books WHERE IsDeleted = 0 AND Ext IS NOT NULL \
+             GROUP BY Ext ORDER BY 2 DESC, 1 COLLATE MHL_SYSTEM_NOCASE",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get(1)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Distinct authors linked to non-deleted books.
+    pub fn count_authors_in_use(&self) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(DISTINCT al.AuthorID) FROM Author_List al \
+             JOIN Books b ON b.BookID = al.BookID WHERE b.IsDeleted = 0",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Distinct series attached to non-deleted books.
+    pub fn count_series_in_use(&self) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(DISTINCT SeriesID) FROM Books WHERE IsDeleted = 0 AND SeriesID IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Distinct genres linked to non-deleted books (from the `Genre_List` links — the `Genres` catalog
+    /// is only seeded by the built-in FB2 genre list, which a fresh import may not have populated).
+    pub fn count_genres_in_use(&self) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(DISTINCT gl.GenreCode) FROM Genre_List gl \
+             JOIN Books b ON b.BookID = gl.BookID WHERE b.IsDeleted = 0",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
     fn scalar_count(&self, sql: &str) -> Result<i64> {
         Ok(self.conn.query_row(sql, [], |r| r.get(0))?)
     }
@@ -338,12 +460,13 @@ impl Db {
     }
 
     /// Genres in use: `(code, display name, book count)`, sorted by name. Derived from the `Genre_List`
-    /// links (always present); the `Genres` catalog is left-joined only for a human alias, falling back
-    /// to the raw code when no catalog row exists yet.
+    /// links (always present); the `Genres` catalog is left-joined for a human alias — matching either
+    /// the dotted `GenreCode` or the raw FB2 code stored on the link — falling back to the raw code when
+    /// no catalog row exists yet.
     pub fn list_genre_nodes(&self) -> Result<Vec<(String, String, i64)>> {
         let mut stmt = self.conn.prepare(
             "SELECT gl.GenreCode, IFNULL(g.GenreAlias, gl.GenreCode), COUNT(*) \
-             FROM Genre_List gl LEFT JOIN Genres g ON g.GenreCode = gl.GenreCode \
+             FROM Genre_List gl LEFT JOIN Genres g ON (g.GenreCode = gl.GenreCode OR g.FB2Code = gl.GenreCode) \
              GROUP BY gl.GenreCode ORDER BY 2 COLLATE MHL_SYSTEM_NOCASE",
         )?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;

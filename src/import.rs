@@ -34,6 +34,8 @@ pub struct ImportReport {
 pub struct Importer<'a> {
     db: &'a mut Db,
     root: PathBuf,
+    /// When true, each book's FB2 `<genre>` code is also registered in the `Genres` catalog if missing.
+    register_genres: bool,
 }
 
 impl<'a> Importer<'a> {
@@ -41,7 +43,14 @@ impl<'a> Importer<'a> {
         Self {
             db,
             root: root.as_ref().to_path_buf(),
+            register_genres: false,
         }
+    }
+
+    /// Also register each imported book's genre code in the `Genres` catalog (grow it from the FB2).
+    pub fn with_register_genres(mut self, on: bool) -> Self {
+        self.register_genres = on;
+        self
     }
 
     /// Recursively import every `.fb2` / `.fbd` file under `dir`.
@@ -174,6 +183,13 @@ impl<'a> Importer<'a> {
             annotation: fb2.annotation().filter(|a| !a.trim().is_empty()),
             review: None,
         };
+
+        // Optionally grow the Genres catalog from this book's FB2 genre codes.
+        if self.register_genres {
+            for gc in &genre_codes {
+                self.db.register_genre_code(gc)?;
+            }
+        }
 
         let genre_refs: Vec<&str> = genre_codes.iter().map(|s| s.as_str()).collect();
         let id = self.db.insert_book(&book, &author_ids, &genre_refs)?;

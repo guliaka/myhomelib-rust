@@ -3,6 +3,8 @@
 //! Only builds with the `gui` feature (see Cargo.toml `required-features`). The DB is opened up front
 //! so a missing/corrupt collection fails with a clear message before the window starts.
 
+use std::path::Path;
+
 fn main() {
     let db_path = std::env::args().nth(1).unwrap_or_else(|| "collection.db".to_string());
 
@@ -11,9 +13,12 @@ fn main() {
         std::process::exit(1);
     }
 
+    // Restore the persisted window size from `<db>.ini` (defaults to 1024×700 if unset).
+    let [w, h] = myhomelib::settings::Settings::load(Path::new(&db_path)).window_size();
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1024.0, 700.0])
+            .with_inner_size([w, h])
             .with_title("MyHomeLib"),
         ..Default::default()
     };

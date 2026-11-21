@@ -1,29 +1,58 @@
 //! egui rendering for [`crate::gui::state::State`]. Pure egui (no eframe/winit), so it compiles and
 //! can be driven headlessly in tests via `egui::Context::default()`.
 
-use egui::{Align, CentralPanel, Layout, RichText, ScrollArea, SidePanel, TextEdit, TopBottomPanel};
+use egui::{
+    Align, CentralPanel, Layout, RichText, ScrollArea, SidePanel, TextEdit, TopBottomPanel, Window,
+};
 
 use super::state::{author_display, State, TABS};
 
 /// Render one frame of the main window from `state`.
 pub fn render(ctx: &egui::Context, state: &mut State) {
-    // Top bar: title + search + count + import.
+    // Top bar: title + count + actions.
     TopBottomPanel::top("topbar").show(ctx, |ui| {
         ui.horizontal(|ui| {
             ui.label(RichText::new("MyHomeLib").strong().size(18.));
-            let prev = state.search.clone();
-            ui.add(TextEdit::singleline(&mut state.search).desired_width(240.).hint_text("Search title…"));
-            if state.search != prev {
-                state.reload();
-            }
             ui.separator();
             ui.label(format!("{} books", state.total_books()));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.button("Import…").clicked() {
                     state.status = "Import: run `myhomelib import <db> <dir>` (GUI file picker lands in Phase 5)".into();
                 }
+                if ui.button("Statistics").clicked() {
+                    state.show_stats = true;
+                }
+                if ui.button("Settings").clicked() {
+                    state.show_settings = true;
+                }
             });
         });
+    });
+
+    // Search panel: multi-field filters (title / author / lang / ext / local-only).
+    TopBottomPanel::top("searchbar").show(ctx, |ui| {
+        let prev = state.filters.clone();
+        ui.horizontal(|ui| {
+            ui.label("Title");
+            ui.add(TextEdit::singleline(&mut state.filters.title).desired_width(150.).hint_text("…"));
+            ui.separator();
+            ui.label("Author");
+            ui.add(TextEdit::singleline(&mut state.filters.author).desired_width(150.));
+            ui.separator();
+            ui.label("Lang");
+            ui.add(TextEdit::singleline(&mut state.filters.lang).desired_width(48.).hint_text("ru"));
+            ui.separator();
+            ui.label("Ext");
+            ui.add(TextEdit::singleline(&mut state.filters.ext).desired_width(48.).hint_text("fb2"));
+            ui.separator();
+            ui.checkbox(&mut state.filters.only_local, "local only");
+            if ui.button("Clear").clicked() {
+                state.clear_search();
+            }
+        });
+        if state.filters != prev {
+            state.reload();
+        }
     });
 
     // Left panel: category tabs + tree.
@@ -35,7 +64,7 @@ pub fn render(ctx: &egui::Context, state: &mut State) {
             ui.horizontal(|ui| {
                 for (i, name) in TABS.iter().enumerate() {
                     if ui.selectable_label(state.tab == i, *name).clicked() {
-                        state.tab = i;
+                        state.set_tab(i);
                     }
                 }
             });
@@ -62,7 +91,16 @@ pub fn render(ctx: &egui::Context, state: &mut State) {
 
     // Central: book list + detail panel.
     CentralPanel::default().show(ctx, |ui| {
-        ui.label(RichText::new(format!("{} — {} books", state.selection.label(), state.books.len())).strong());
+        let heading = format!(
+            "{} — {} books",
+            if state.filters.is_empty() {
+                state.selection.label()
+            } else {
+                "Search".to_string()
+            },
+            state.books.len()
+        );
+        ui.label(RichText::new(heading).strong());
         ui.separator();
 
         let rows: Vec<(String, bool)> = state
@@ -129,6 +167,89 @@ pub fn render(ctx: &egui::Context, state: &mut State) {
             }
         }
     });
+
+    // Statistics dialog. Data is gathered into an owned struct first; the dialog's open/close state is a
+    // local bool so the closure can capture `state` without a borrow conflict with `.open(..)`.
+    if state.show_stats {
+        let data = state.stats_data();
+        let mut open = true;
+        Window::new("Collection statistics")
+            .open(&mut open)
+            .min_size(egui::vec2(340.0, 280.0))
+            .show(ctx, |ui| {
+                ui.label(format!("Books: {}", data.books));
+                ui.label(format!("Authors: {}", data.authors));
+                ui.label(format!("Series: {}", data.series));
+                ui.label(format!("Genres: {}", data.genres));
+                ui.separator();
+                ui.label(RichText::new("By language").strong());
+                if data.by_lang.is_empty() {
+                    ui.label(RichText::new("(none)").weak());
+                } else {
+                    for (lang, n) in &data.by_lang {
+                        ui.horizontal(|ui| {
+                            ui.monospace(lang.as_str());
+                            ui.label(format!("{n}"));
+                        });
+                    }
+                }
+                ui.separator();
+                ui.label(RichText::new("By extension").strong());
+                if data.by_ext.is_empty() {
+                    ui.label(RichText::new("(none)").weak());
+                } else {
+                    for (ext, n) in &data.by_ext {
+                        ui.horizontal(|ui| {
+                            ui.monospace(format!(".{ext}"));
+                            ui.label(format!("{n}"));
+                        });
+                    }
+                }
+            });
+        state.show_stats = open;
+    }
+
+    // Settings dialog: window size, reader associations (extension → command), last import dir.
+    if state.show_settings {
+        let mut open = true;
+        Window::new("Settings")
+            .open(&mut open)
+            .min_size(egui::vec2(440.0, 320.0))
+            .show(ctx, |ui| {
+                let ws = state.settings.window_size();
+                ui.horizontal(|ui| {
+                    ui.label(format!("Window: {:.0} × {:.0}", ws[0], ws[1]));
+                });
+                if let Some(dir) = state.settings.last_import_dir() {
+                    ui.label(format!("Last import dir: {dir}"));
+                }
+                ui.separator();
+                ui.label(RichText::new("Reader associations (extension → command)").strong());
+                let readers = state.settings.readers();
+                if readers.is_empty() {
+                    ui.label(RichText::new("(none configured)").weak());
+                } else {
+                    for (ext, cmd) in &readers {
+                        ui.horizontal(|ui| {
+                            ui.monospace(format!(".{ext}"));
+                            ui.separator();
+                            ui.label(cmd.as_str());
+                        });
+                    }
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label("Ext");
+                    ui.add(TextEdit::singleline(&mut state.reader_ext).desired_width(50.).hint_text("fb2"));
+                    ui.label("Command");
+                    ui.add(TextEdit::singleline(&mut state.reader_cmd).desired_width(240.).hint_text("/path/reader %f"));
+                });
+                if ui.button("Save reader").clicked() {
+                    state.apply_reader();
+                }
+            });
+        state.show_settings = open;
+    }
 }
 
 /// Human-readable file size.

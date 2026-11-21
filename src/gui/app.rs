@@ -14,7 +14,7 @@ impl MyHomeLibApp {
     pub fn new(db_path: &str) -> Result<Self, crate::error::AppError> {
         let db = Db::open(db_path)?;
         Ok(Self {
-            state: state::State::new(db),
+            state: state::State::new(db, db_path),
         })
     }
 }
@@ -22,6 +22,7 @@ impl MyHomeLibApp {
 impl eframe::App for MyHomeLibApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         view::render(ctx, &mut self.state);
-        // eframe repaints on input; no extra timer is needed for Phase 4.
+        // eframe repaints on input; no extra timer is needed. (Window-size auto-save is deferred —
+        // the persisted size in `<db>.ini` is still read on launch.)
     }
 }

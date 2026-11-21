@@ -1,0 +1,99 @@
+# MyHomeLib — initial FB2 genre list (standard FB2 codes + Russian aliases).
+#
+# Format (mirrors the original `TBookCollection.LoadGenres`, unit_Database_Abstract.pas):
+#   <dotted.code> [fb2code;]alias
+# - blank lines and lines starting with '#' are ignored
+# - a line without a '.' in its code is ignored (top-level roots are implicit)
+# - the dotted code is hierarchical: 0.1 -> parent 0, 0.1.1 -> parent 0.1, ...
+# - the fb2 code (before ';') is the value found in an FB2 <genre> element; it may be absent
+#
+# Replace or extend this whole catalog with:  myhomelib genres <db> --file <path>
+
+# --- Художественная литература (lit) --------------------------------------
+0.1 lit;Художественная литература
+0.1.1 prose;Проза
+0.1.1.1 prose_classic;Классическая проза
+0.1.1.2 prose_contemporary;Современная проза
+0.1.1.3 love;Любовные романы
+0.1.1.3.1 love_classic;Классические любовные романы
+0.1.1.3.2 love_history;Исторические любовные романы
+0.1.1.3.3 love_grand;Крупный роман
+0.1.1.3.4 love_erotic;Эротика и интимная психология
+0.1.1.4 detective;Детективы
+0.1.1.4.1 detective_classic;Классический детектив
+0.1.1.4.2 detective_crossword;Кроссвордный детектив
+0.1.1.4.3 detective_police;Полицейский детектив
+0.1.1.4.4 detective_hardcore;Жёсткий детектив
+0.1.1.4.5 detective_irony;Иронический детектив
+0.1.1.4.6 detective_action;Боевик
+0.1.1.5 fantasy;Фантастика
+0.1.1.5.1 space_opera;Космическая опера
+0.1.1.5.2 sf;Научная фантастика
+0.1.1.5.3 alt_history;Альтернативная история
+0.1.1.5.4 fantastyka;Фэнтези
+0.1.1.5.4.1 epic_fantasy;Эпическое фэнтези
+0.1.1.5.4.2 heroic_fantasy;Героическое фэнтези
+0.1.1.5.4.3 urban_fantasy;Городское фэнтези
+0.1.1.5.4.4 dark_fantasy;Тёмное фэнтези
+0.1.1.5.5 terror;Ужасы
+0.1.1.5.6 humor;Юмор
+0.1.2 poetry;Поэзия
+0.1.2.1 poetry_classic;Классическая поэзия
+0.1.2.2 poetry_contemporary;Современная поэзия
+0.1.2.3 poetry_verse;Верлибр
+0.1.2.4 poetry_song;Песенная поэзия
+0.1.3 drama;Драма
+
+# --- Неликт / документальная (nonlit) -------------------------------------
+0.2 nonlit;Неликт, документальная литература
+0.2.1 history;История
+0.2.1.1 history_antiquity;Древняя история
+0.2.1.2 history_ancient_world;Античная история
+0.2.1.3 history_europe;История Европы
+0.2.1.4 history_russia;История России
+0.2.1.5 history_world;Всеобщая история
+0.2.1.6 military_history;Военная история
+0.2.1.7 history_biography;Мемуары и биографии
+0.2.2 religion;Религия и духовность
+0.2.2.1 christianity;Христианство
+0.2.2.2 bible;Библия и религия
+0.2.2.3 esoterics;Эзотерика
+0.2.2.4 occultism;Оккультизм
+0.2.2.5 mythology;Мифы и легенды
+0.2.3 psych;Психология
+0.2.3.1 psych_psychoanalysis;Психоанализ
+0.2.3.2 psych_personality;Психология личности
+0.2.4 econ;Экономика и право
+0.2.4.1 law;Право
+0.2.4.2 econ_economics;Экономика
+0.2.5 med;Медицина
+0.2.5.1 healthy_living;Здоровый образ жизни
+0.2.6 tourism;Туризм и путешествия
+0.2.7 home;Дом и семья
+0.2.7.1 cooking;Кулинария
+0.2.7.2 health;Здоровье
+0.2.7.3 crafts;Хобби и ремёсла
+0.2.7.4 country;Дача, сад, огород
+
+# --- Компьютеры и Интернет (comp) -----------------------------------------
+0.3 comp;Компьютеры и Интернет
+0.3.1 programming;Программирование
+0.3.1.1 java;Java
+0.3.1.2 python;Python
+0.3.1.3 cplus;C / C++
+0.3.1.4 pascal;Pascal / Delphi
+0.3.1.5 php;PHP
+0.3.1.6 web_design;Веб-дизайн и веб-разработка
+0.3.2 comp_programming;Программирование (общее)
+0.3.3 comp_internet;Интернет
+
+# --- Справочная литература (ref) ------------------------------------------
+0.4 ref;Справочная литература
+0.4.1 dictionary;Словари
+0.4.2 encyclopedias;Энциклопедии
+
+# --- Учебники и пособия (learn) -------------------------------------------
+0.5 learn;Учебники и пособия
+0.5.1 school;Школьная литература
+0.5.2 uni;Университет
+0.5.3 elearning;Электронное обучение

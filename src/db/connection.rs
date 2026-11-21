@@ -39,7 +39,7 @@ impl Db {
         // UDFs must exist before any DDL that mentions them.
         register_mhl_affinities(&conn);
 
-        let db = Self {
+        let mut db = Self {
             conn,
             triggers_enabled: Arc::new(AtomicBool::new(true)),
         };
@@ -61,7 +61,7 @@ impl Db {
 
     /// Idempotent and non-destructive: only runs the create script when the collection is not yet
     /// initialized (the `Books` table is absent). An existing populated DB is never dropped.
-    fn ensure_schema(&self) -> Result<()> {
+    fn ensure_schema(&mut self) -> Result<()> {
         let exists: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='Books'",
             [],
@@ -77,6 +77,9 @@ impl Db {
         // Safe here because the DB is empty: the script's `PRAGMA page_size` and
         // `DROP TABLE IF EXISTS` statements only make sense on a fresh file.
         self.conn.execute_batch(SCHEMA)?;
+        // A new collection starts with the built-in FB2 genre tree (the original's CreateCollection
+        // loads it too). Existing collections are never touched by this path.
+        self.seed_builtin_genres()?;
         Ok(())
     }
 }
