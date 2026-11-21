@@ -4,7 +4,7 @@
 
 use myhomelib::core::Book;
 use myhomelib::db::Db;
-use myhomelib::gui::state::{State, Selection};
+use myhomelib::gui::state::{State, Selection, TABS};
 use myhomelib::gui::view;
 use myhomelib::librusec::catalog::{Catalog, CatalogBook};
 
@@ -99,8 +99,16 @@ fn navigation_by_author_genre_series_folder() {
     state.select(Selection::Author(tolstoy));
     assert_eq!(titles(&mut state), vec!["Анна Каренина", "Война и мир"]);
 
-    // Genres tab: one genre in use, all three books share it.
+    // Series tab (1): one series with a single book.
     state.set_tab(1);
+    let series = state.tree_nodes();
+    assert_eq!(series.len(), 1);
+    assert_eq!(series[0].count, 1);
+    state.select(Selection::Series(wiwar));
+    assert_eq!(titles(&mut state), vec!["Война и мир"]);
+
+    // Genres tab (2): one genre in use, all three books share it.
+    state.set_tab(2);
     let genres = state.tree_nodes();
     assert_eq!(genres.len(), 1);
     assert!(matches!(&genres[0].selection, Selection::Genre(c) if c == "prose_classic"));
@@ -108,16 +116,8 @@ fn navigation_by_author_genre_series_folder() {
     state.select(Selection::Genre("prose_classic".into()));
     assert_eq!(state.list_total, 3);
 
-    // Series tab: one series with a single book.
-    state.set_tab(2);
-    let series = state.tree_nodes();
-    assert_eq!(series.len(), 1);
-    assert_eq!(series[0].count, 1);
-    state.select(Selection::Series(wiwar));
-    assert_eq!(titles(&mut state), vec!["Война и мир"]);
-
-    // Folders tab: root (1) + "russian" (2).
-    state.set_tab(3);
+    // Groups/Folders tab (4): root (1) + "russian" (2).
+    state.set_tab(4);
     let folders = state.tree_nodes();
     assert_eq!(folders.len(), 2);
     state.select(Selection::Folder(Some("russian".into())));
@@ -221,6 +221,13 @@ fn render_smoke_headless() {
         if frame == 2 {
             state.show_stats = true;
         }
+        let _ = ctx.run(egui::RawInput::default(), |ctx| view::render(ctx, &mut state)); // no panic
+    }
+
+    // Walk every page-control tab and render it headlessly — catches a panic in any per-tab layout
+    // (menu/toolbar/tab-bar/nav/search/downloads) that the single default-frame loop above doesn't reach.
+    for t in 0..TABS.len() {
+        state.set_tab(t);
         let _ = ctx.run(egui::RawInput::default(), |ctx| view::render(ctx, &mut state)); // no panic
     }
 

@@ -64,8 +64,15 @@ pub struct TreeNode {
     pub count: i64,
 }
 
-/// Left-panel category tabs (index = [`State::tab`]).
-pub const TABS: [&str; 4] = ["Authors", "Genres", "Series", "Folders"];
+/// Main page-control tabs, in the original's order. Index = [`State::tab`].
+///   0 Авторы / 1 Серии / 2 Жанры — category views (left tree + book grid)
+///   3 Поиск — multi-field search form + results grid
+///   4 Группы — collection grouping (the folder tree + book grid for now)
+///   5 Список загрузок — the download queue table
+pub const TABS: [&str; 6] = ["Авторы", "Серии", "Жанры", "Поиск", "Группы", "Список загрузок"];
+
+/// The tabs that show a category tree in the left nav plus a book grid.
+const CATEGORY_TABS: [usize; 4] = [0, 1, 2, 4];
 
 /// Multi-field search filters. When any field is set, the list shows matches instead of the tree node.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -122,9 +129,9 @@ pub struct State {
     // Per-tab cached left-panel trees. Each is a full-scan GROUP BY over the whole collection, so it's
     // built once per tab (and again after any data mutation) — never per-frame, which would freeze the UI
     // at large scale. Re-visiting a tab is instant after its first build.
-    tree_cache: [Vec<TreeNode>; 4],
-    tree_built: [bool; 4],
-    /// Active left-panel tab index (into [`TABS`]).
+    tree_cache: [Vec<TreeNode>; 6],
+    tree_built: [bool; 6],
+    /// Active main page-control tab index (into [`TABS`]).
     pub tab: usize,
     /// Status-bar message.
     pub status: String,
@@ -176,7 +183,7 @@ impl State {
             win_count: 0,
             win_books: Vec::new(),
             tree_cache: std::array::from_fn(|_| Vec::new()),
-            tree_built: [false; 4],
+            tree_built: [false; 6],
             tab: active_tab,
             status: "Ready".to_string(),
             settings,
@@ -266,13 +273,32 @@ impl State {
         self.reload();
     }
 
-    /// Switch left-panel tab and persist it.
+    /// Switch the main page-control tab and persist it. Each tab starts from a clean slate (all books,
+    /// no active search) so its left tree + grid reflect that tab's own context.
     pub fn set_tab(&mut self, tab: usize) {
         if (0..TABS.len()).contains(&tab) && tab != self.tab {
             self.tab = tab;
+            self.selection = Selection::All;
+            self.filters = SearchFilters::default();
+            self.reload();
             self.settings.set_active_tab(tab);
             let _ = self.settings.save(&self.db_path);
         }
+    }
+
+    /// True for the tabs that show a category tree in the left nav plus a book grid.
+    pub fn is_category_tab(&self) -> bool {
+        CATEGORY_TABS.contains(&self.tab)
+    }
+
+    /// True for the multi-field search tab (search form + results grid, no left tree).
+    pub fn is_search_tab(&self) -> bool {
+        self.tab == 3
+    }
+
+    /// True for the download-queue tab.
+    pub fn is_downloads_tab(&self) -> bool {
+        self.tab == 5
     }
 
     /// Rows for the active left-panel tab. Cached per tab — the underlying query is a full-scan GROUP BY
@@ -285,14 +311,21 @@ impl State {
         }
         let mut out = Vec::new();
         match t {
-            0 => {
+            0 => { // Авторы
                 if let Ok(v) = self.db.list_author_nodes() {
                     for (id, name, count) in v {
                         out.push(TreeNode { selection: Selection::Author(id), label: name, count });
                     }
                 }
             }
-            1 => {
+            1 => { // Серии
+                if let Ok(v) = self.db.list_series_nodes() {
+                    for (id, title, count) in v {
+                        out.push(TreeNode { selection: Selection::Series(id), label: title, count });
+                    }
+                }
+            }
+            2 => { // Жанры
                 if let Ok(v) = self.db.list_genre_nodes() {
                     for (code, alias, count) in v {
                         out.push(TreeNode {
@@ -303,14 +336,7 @@ impl State {
                     }
                 }
             }
-            2 => {
-                if let Ok(v) = self.db.list_series_nodes() {
-                    for (id, title, count) in v {
-                        out.push(TreeNode { selection: Selection::Series(id), label: title, count });
-                    }
-                }
-            }
-            _ => {
+            4 => { // Группы (folder-based grouping for now)
                 if let Ok(v) = self.db.list_folder_nodes() {
                     for (folder, count) in v {
                         let label = folder.clone().unwrap_or_else(|| "(root)".to_string());
@@ -318,6 +344,7 @@ impl State {
                     }
                 }
             }
+            _ => {} // Поиск (3) and Список загрузок (5) have no left tree
         }
         self.tree_built[t] = true;
         self.tree_cache[t] = out.clone();
@@ -337,7 +364,7 @@ impl State {
                     self.status = format!("Deleted book #{id}");
                     self.selected_book_id = None;
                     self.reload();
-                    self.tree_built = [false; 4]; // per-node book counts may have changed
+                    self.tree_built = [false; 6]; // per-node book counts may have changed
                 }
                 Err(e) => self.status = format!("delete failed: {e}"),
             }
@@ -351,7 +378,7 @@ impl State {
     pub fn import_dir(&mut self, dir: &Path) -> crate::error::Result<ImportReport> {
         let report = Importer::new(&mut self.db, dir).import_dir(dir)?;
         self.reload();
-        self.tree_built = [false; 4]; // new books may add nodes / change per-node counts
+        self.tree_built = [false; 6]; // new books may add nodes / change per-node counts
         self.status = format!(
             "Imported {} book(s) from {} — {} already present, {} error(s)",
             report.imported,
