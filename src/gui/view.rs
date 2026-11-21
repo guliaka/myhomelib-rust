@@ -171,11 +171,15 @@ pub fn render(ctx: &egui::Context, state: &mut State) {
                     );
                     let folder = b.folder.clone();
                     let ann = b.annotation.clone();
+                    let genres = state.db.book_genres(id).unwrap_or_default();
 
                     ui.horizontal_wrapped(|ui| {
                         ui.label(RichText::new(title.as_str()).strong());
                         if !authors.is_empty() {
                             ui.label(format!("— {}", authors.join(", ")));
+                        }
+                        if !genres.is_empty() {
+                            ui.label(format!("· {}", genres.join(", ")));
                         }
                         ui.label(format!("· {file}"));
                         if let Some(f) = folder {
@@ -456,14 +460,14 @@ struct GridCol {
 /// Column layout for the book grid. The narrow columns have fixed widths; "Title" absorbs the leftover
 /// panel width so the grid spans the full central area like the original's TBookTree.
 fn book_grid_columns(available: f32) -> Vec<GridCol> {
-    let fixed = 60.0 + 45.0 + 78.0 + 64.0; // language, #, size, rating
+    let fixed = 45.0 + 78.0 + 64.0 + 92.0; // #, size, rating, added-date
     let title_w = (available - fixed).max(180.0);
     vec![
-        GridCol { header: "Title", width: title_w, center: false },
-        GridCol { header: "Lang", width: 60.0, center: true },
-        GridCol { header: "#", width: 45.0, center: true },
-        GridCol { header: "Size", width: 78.0, center: true },
-        GridCol { header: "Rating", width: 64.0, center: true },
+        GridCol { header: "Название", width: title_w, center: false },
+        GridCol { header: "№", width: 45.0, center: true },
+        GridCol { header: "Размер", width: 78.0, center: true },
+        GridCol { header: "Рейтинг", width: 64.0, center: true },
+        GridCol { header: "Добавлено", width: 92.0, center: false },
     ]
 }
 
@@ -471,10 +475,11 @@ fn book_grid_columns(available: f32) -> Vec<GridCol> {
 fn book_cell_texts(b: &Book) -> Vec<String> {
     vec![
         b.title.clone(),
-        b.lang.clone().unwrap_or_else(|| "-".to_string()),
         b.seq_number.map(|n| n.to_string()).unwrap_or_else(|| "—".to_string()),
         size_str(b.book_size),
         if b.rate > 0 { b.rate.to_string() } else { "—".to_string() },
+        // update_date is a formatted string (e.g. "2026-01-01 00:00:00"); show the date part only.
+        b.update_date.split(' ').next().unwrap_or("").to_string(),
     ]
 }
 
