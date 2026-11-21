@@ -3,10 +3,13 @@
 Rust rewrite of [MyHomeLib](https://github.com/guliaka/MyHomeLib.git) — a home e-book library
 manager (FreePascal/Lazarus original). Caters to FB2/FBD collections and Librusec-based libraries.
 
-**Status: complete — all 7 phases.** Data layer, FB2/FBD engine, headless import/export, the egui GUI,
-search/settings/statistics, the Librusec online client (catalog search + download queue), and performance
-work for 1M+ book libraries (virtualized book list + cached trees). See [`PORTING_NOTES.md`](./PORTING_NOTES.md)
-for the phase plan, decisions, and deferred items.
+**Status: in progress — roughly a third of the original's functionality.** Working: the data layer
+(opens existing collections unchanged), the FB2/FBD engine, folder import, **INPX import** (builds a
+1M-book collection from an index in ~3 min), the **system database** (collection registry + groups), the
+egui window (six tabs, virtualized grid *and* tree, background imports with a progress page), search,
+statistics, and the Librusec script engine. Not yet ported: opening books in a reader, multi-collection UI
+and the new-collection wizard, ratings/groups/reviews, editing dialogs, export to device, most view
+toggles. See [`PORTING_NOTES.md`](./PORTING_NOTES.md) — "Remaining work" — for the list and estimates.
 
 ## Layout
 ```
@@ -16,6 +19,9 @@ src/
   fb2/      # FB2/FBD engine: lossless element-tree model, parser, serializer, ZIP container
   genres.rs # built-in FB2 genre tree + file-format parser (seed / reload / pull-from-FB2)
   import.rs # headless catalog import (scan dir, extract metadata, dedupe by source file)
+  inpx.rs   # INPX index -> local collection (port of TImportInpxThread); idempotent, cancellable
+  sysdb.rs  # system database `user.dbs2`: collection registry (Bases) + book groups
+  jobs.rs   # background jobs: progress, log, cooperative cancel (GUI/CLI/tests)
   export.rs # headless metadata export (rebuild an FB2 from a stored book)
   settings.rs# user settings: minimal ordered INI store at `<db>.ini` (readers, tab, window size, Librusec)
   librusec/ # Librusec online client: connection-script engine, INPX catalog parser, download queue
@@ -59,6 +65,11 @@ cargo run -- stats   demo.db                    # collection counts
 cargo run -- import  demo.db /path/to/fb2-dir [--register-genres]   # scan dir, extract + dedupe
 cargo run -- genres  demo.db [--seed | --file list.txt]             # list / re-seed / replace genre catalog
 cargo run -- export  demo.db <book-id> out.fb2  # rebuild a book's metadata as FB2
+cargo run -- import-inpx lib.hlc2 librusec.inpx [--root /books]     # build a collection from an INPX index
+cargo run -- collections user.dbs2 [list]                           # collection registry
+cargo run -- collections user.dbs2 create "Name" lib.hlc2 /books [--inpx librusec.inpx]
+cargo run -- collections user.dbs2 register "Name" lib.hlc2 /books
+cargo run -- collections user.dbs2 delete <id> [--remove-file]
 ```
 
 ## GUI (Phases 4–6)

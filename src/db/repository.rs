@@ -483,16 +483,32 @@ impl Db {
 
     /// Authors that have books: `(AuthorID, display name, book count)`, sorted by name.
     pub fn list_author_nodes(&self) -> Result<Vec<(i64, String, i64)>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT au.AuthorID, MHL_FULLNAME(au.LastName, au.FirstName, au.MiddleName), COUNT(al.BookID) \
-             FROM Authors au JOIN Author_List al ON al.AuthorID = au.AuthorID \
-             GROUP BY au.AuthorID ORDER BY 2 COLLATE MHL_SYSTEM_NOCASE",
-        )?;
-        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row?);
+        // Two index/table scans joined in memory and sorted here, instead of one SQL
+        // `JOIN … GROUP BY … ORDER BY <collation>`: at 400k+ authors the SQL form spends seconds in
+        // per-comparison collation callbacks and UDF calls; this is several times faster.
+        let mut counts: HashMap<i64, i64> = HashMap::new();
+        {
+            let mut stmt = self.conn.prepare("SELECT AuthorID, COUNT(*) FROM Author_List GROUP BY AuthorID")?;
+            let mut rows = stmt.query([])?;
+            while let Some(r) = rows.next()? {
+                counts.insert(r.get(0)?, r.get(1)?);
+            }
         }
+        let mut out: Vec<(i64, String, i64)> = Vec::with_capacity(counts.len());
+        {
+            let mut stmt = self.conn.prepare("SELECT AuthorID, LastName, FirstName, MiddleName FROM Authors")?;
+            let mut rows = stmt.query([])?;
+            while let Some(r) = rows.next()? {
+                let id: i64 = r.get(0)?;
+                let Some(&count) = counts.get(&id) else { continue }; // authors without books
+                let last: String = r.get(1)?;
+                let first: Option<String> = r.get(2)?;
+                let middle: Option<String> = r.get(3)?;
+                out.push((id, search::format_name(&last, first.as_deref(), middle.as_deref()), count));
+            }
+        }
+        // Same order as MHL_SYSTEM_NOCASE (Unicode case-insensitive), ties broken by id for stability.
+        out.sort_by_cached_key(|(id, name, _)| (name.to_lowercase(), *id));
         Ok(out)
     }
 

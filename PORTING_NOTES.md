@@ -21,6 +21,25 @@ with a reason — nothing is dropped silently.
 | 6 | Librusec client + download queue (`librusec/`) | ✅ done | Connection-script engine (GET/POST/ADD/CHECK/REDIR/PAUSE) + macro substitution, INPX catalog parser, background search + download queue with progress/cancel. GUI Online tab wired. Engine is pure Rust, unit-tested vs a mock transport; live HTTP via reqwest (rustls). `cargo test` green (7 librusec + online GUI). |
 | 7 | Polish + performance | ✅ done | Book list **virtualized** (`show_rows` + `LIMIT/OFFSET` window fetch, selection by stable id) and left-panel trees **cached per tab**, so cold start is a single `COUNT(*)` — flat at any library size. Benchmark at 1M books: open+state 27 ms, first frame ~230 ms (egui init). Windows build via CI (`rustls`, no OpenSSL). |
 
+
+> **Scope correction.** "Done" above means the phase's *planned slice* shipped and is tested — not
+> that the original is fully ported. Measured against the original's 76 main-form actions the port
+> covers roughly a third. The gap list and estimates are in **Remaining work** below.
+
+## Remaining work (dev-days, one experienced Rust developer)
+
+| # | Area | State | Left |
+|---|------|-------|------|
+| 1 | INPX + archive-backed collections, background import | **engine, CLI, GUI job done** (D16, D18). fb2.zip archive *scan* import (no INPX) not ported | 2 |
+| 2 | Multiple collections | **system DB + CLI done** (D17). GUI: collection switcher, new-collection wizard, properties, delete | 4–5 |
+| 3 | Open a book in a reader (extract from archive, launch), book-info dialog with cover | not started | 3–4 |
+| 4 | User data: groups UI + membership, favourites, rating, read flag, reviews, import/export | group registry only (D17) | 4–5 |
+| 5 | Editing: book / author / series / genre dialogs, add non-FB2, convert to FBD | not started | 6–8 |
+| 6 | Export to device (filename templater, zip), HTML / TXT / RTF / INPX export | metadata-only FB2 export | 5–7 |
+| 7 | View: alphabet bars, tree/table view, column picker, hide-deleted / local-only, presets, full settings | not started | 6–8 |
+| 8 | Downloads into the collection, online collection updates, sync / repair / compact | script engine + queue only | 4–5 |
+| 9 | Windows verification, test against a real existing library, bug fixing | never run on Windows | 6–10 |
+
 ---
 
 ## Decisions
@@ -179,6 +198,52 @@ original's view/collection toggles and show their tooltip until ported. Headless
 placeholder per icon since `image` is gui-only. *Known delta:* egui draws flat widgets, so the toolbar/menu can't
 be pixel-identical to beveled native Win32 controls — this is the closest achievable in pure egui.
 
+### D16 — INPX import = faithful port of `TImportInpxThread`, with three deliberate deltas
+`inpx.rs` follows the original record for record: `structure.info` field order (default structure when
+absent), `Chr(4)` / `:` / `,` delimiters, `Normalize` (missing title → «Без названия», missing author →
+«Неизвестный», missing genre → `0.0`), `DEL >= "1"`, `SeqNumber > 5000 → 0`, extension stored with its dot,
+date as `yyyy-mm-dd 00:00:00.000`; local collections get `Folder = <inp name>.zip` + `InsideNo = line
+index` unless the structure has `FOLDER`; online collections get the generated `Letter\Author\LibID
+Title.fb2.zip` location and skip nothing (`extra.inp` is local-skipped); `collection.info` /
+`version.info` set the notes / URL / script / data-version properties. Deltas:
+- **Idempotent.** The original inserts every record on every run, so importing the same INPX twice
+  doubles the collection. Here a record whose (folder, file, position) is already present is skipped —
+  re-running after a cancel, or importing a newer INPX, only adds what is new.
+- **Unknown FB2 genre codes are kept verbatim** in `Genre_List` instead of collapsing to `0.0`; the views
+  resolve a link by either the universal or the FB2 code, so nothing is lost when the catalog lacks a code.
+- **A list item without its terminating `:` is still read** (the original silently drops it).
+Speed: ids for authors / series / genres come from in-memory maps, one transaction per `.inp`, schema
+triggers off (the DAO writes the `Search*` columns itself), 256 MB page cache on the import connection.
+Measured on this box, synthetic 1M-record INPX (425k authors, 40k series): **167 s**, 765 MB file;
+re-import (all present) 3 s.
+
+### D17 — System database = the original's `user.dbs2`, schema verbatim
+`sysdb.rs` ports the registry half of `TSystemData_SQLite`: `Bases` create / register / update / delete
+(the delete trigger drops the collection's grouped-book copies) and group add / rename / clear / delete
+with the two undeletable built-ins («Избранное», id 1, and «К прочтению»). New collections are stamped
+with the original's schema-version GUID and type code so the original accepts them, and
+`Db::probe_collection` is the port of `IsValidCollection`. Paths are stored relative to the system
+database's folder when under it (the original uses its data folder), absolute otherwise; Windows-style
+stored paths are understood on any platform. Not yet ported: grouped-book copies (`Books` /
+`BookGroups` writes), per-book user data, user-data import/export.
+
+### D18 — Background jobs: own connection per job, progress page instead of the main window
+`jobs.rs` is the `TWorker` + progress-form pair: a thread, a cloneable progress handle (percent, comment,
+capped log, error count, cooperative cancel), and a result; a panic in the job becomes an error result.
+A job opens its **own** SQLite connection (rusqlite connections aren't `Send`, and the original does the
+same), with a 10 s busy timeout on every connection. While a job is active the window shows only the
+progress page (Прервать / Закрыть + log tail), so the UI connection issues no queries that could block
+on the writer; acknowledging the job rebuilds the trees and the list. Both INPX and folder import run
+this way — the folder import no longer freezes the window (supersedes the limitation noted in D13).
+
+### D19 — Left tree virtualized; author tree built in memory
+The tree cloned and laid out *every* node on *every* frame — fine for the 3-author fixtures, unusable at
+library scale (first paint took ~15 s with 425k authors). It is now rendered with `show_rows` straight
+from the cached slice. The author-tree query was also rewritten: counts from an `Author_List` index scan,
+names from `Authors`, joined and sorted in Rust (6.5 s → 0.5 s at 425k authors, release build). Author
+names are shown in display case (the 4-argument `MHL_FULLNAME` always upper-cases — it is the
+`SearchName` form), and the grid's Жанр column shows genre names instead of codes.
+
 ---
 
 ## Faithful behavior recovered from the original source
@@ -270,3 +335,9 @@ These were read from the FreePascal source, not guessed — implementers should 
   headlessly without panic. `cargo test` green (34 total) and `cargo build` / `cargo build --features gui` clean
   with no warnings on either feature set; all 16 bundled icons verified valid PNGs. Visual verification on a real
   Windows box is still pending (headless here).
+- **INPX import, system DB, background jobs, tree virtualization (D16–D19, on `fable-t1`)** — `cargo test`
+  green: 46 tests (8 lib unit, 5 new INPX/system-DB integration, GUI suite now 8 incl. a background import
+  driven through the progress page), `cargo build` and `cargo build --features gui` clean, no warnings.
+  CLI e2e on a synthetic 1M-record INPX: `collections create … --inpx` → 1,000,000 books in 167 s, re-import
+  adds 0. The windowed binary was run against that collection under Xvfb (software GL) and screenshotted:
+  tree and grid populated, genre names resolved. Still not run on Windows.
