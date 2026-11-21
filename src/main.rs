@@ -7,7 +7,11 @@ use std::path::Path;
 use myhomelib::core::Book;
 use myhomelib::db::{BookQuery, Db};
 use myhomelib::export::Exporter;
+use myhomelib::db::props;
 use myhomelib::import::Importer;
+use myhomelib::inpx::{import_inpx, InpxOptions};
+use myhomelib::jobs::{Job, Severity};
+use myhomelib::sysdb::SystemDb;
 
 fn main() {
     init_tracing();
@@ -35,6 +39,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some("import") => cmd_import(&args[1..]),
         Some("genres") => cmd_genres(&args[1..]),
         Some("export") => cmd_export(&args[1..]),
+        Some("import-inpx") => cmd_import_inpx(&args[1..]),
+        Some("collections") => cmd_collections(&args[1..]),
         _ => {
             print_usage();
             Ok(())
@@ -199,6 +205,128 @@ fn cmd_export(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Build a local collection from an INPX index. Progress goes to stderr.
+fn cmd_import_inpx(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    const USAGE: &str = "usage: myhomelib import-inpx <db-path> <file.inpx> [--root <books-dir>]";
+    let mut pos: Vec<&String> = Vec::new();
+    let mut root = None;
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--root" {
+            i += 1;
+            root = args.get(i).map(std::path::PathBuf::from);
+        } else {
+            pos.push(&args[i]);
+        }
+        i += 1;
+    }
+    let (db_path, inpx) = match pos.as_slice() {
+        [d, f] => (d.to_string(), std::path::PathBuf::from(f)),
+        _ => return Err(USAGE.into()),
+    };
+    let started = std::time::Instant::now();
+    let mut job = Job::spawn("import-inpx", move |p| {
+        let db = Db::open(&db_path)?;
+        let opts = InpxOptions { root, ..Default::default() };
+        Ok(import_inpx(&db, &inpx, &opts, p)?.summary())
+    });
+    let mut last = -1i64;
+    while !job.is_done() {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let pct = job.progress.percent() as i64;
+        if pct != last {
+            last = pct;
+            eprint!("\r{pct:3}%  {}        ", job.progress.comment());
+        }
+    }
+    job.join();
+    eprintln!();
+    let errors = job.progress.error_count();
+    for l in job.progress.log_lines().iter().filter(|l| l.severity == Severity::Error).take(20) {
+        eprintln!("  error: {}", l.text);
+    }
+    match job.progress.result() {
+        Some(Ok(summary)) => {
+            println!("{summary} — {:.1} s, ошибок: {errors}", started.elapsed().as_secs_f64());
+            Ok(())
+        }
+        Some(Err(e)) => Err(e.into()),
+        None => Err("import job ended without a result".into()),
+    }
+}
+
+/// Manage the collection registry in a system database (`user.dbs2`).
+fn cmd_collections(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    const USAGE: &str = "usage: myhomelib collections <user.dbs2> [list]\n\
+       \x20      myhomelib collections <user.dbs2> create <name> <db-file> <books-dir> [--inpx <file.inpx>]\n\
+       \x20      myhomelib collections <user.dbs2> register <name> <db-file> <books-dir>\n\
+       \x20      myhomelib collections <user.dbs2> delete <id> [--remove-file]";
+    let sys_path = args.first().ok_or(USAGE)?;
+    let sys = SystemDb::open(sys_path)?;
+    match args.get(1).map(String::as_str) {
+        None | Some("list") => {
+            let all = sys.collections()?;
+            println!("{} collection(s):", all.len());
+            for c in &all {
+                println!(
+                    "  [{}] {} — {}\n        db: {}\n        books: {}",
+                    c.id,
+                    c.name,
+                    props::code_label(c.code),
+                    c.db_file.display(),
+                    c.root_folder.display()
+                );
+            }
+            Ok(())
+        }
+        Some("create") => {
+            let name = args.get(2).ok_or(USAGE)?;
+            let file = Path::new(args.get(3).ok_or(USAGE)?);
+            let root = Path::new(args.get(4).ok_or(USAGE)?);
+            let inpx = match args.get(5).map(String::as_str) {
+                Some("--inpx") => Some(args.get(6).ok_or(USAGE)?.clone()),
+                Some(_) => return Err(USAGE.into()),
+                None => None,
+            };
+            // An INPX-backed collection is an external local library unless its header says otherwise.
+            let code = match &inpx {
+                Some(f) => myhomelib::inpx::read_header(Path::new(f))?
+                    .map(|h| h.content_type)
+                    .filter(|c| *c != props::CT_PRIVATE_FB)
+                    .unwrap_or(props::CT_EXTERNAL_LOCAL_FB),
+                None => props::CT_PRIVATE_FB,
+            };
+            let id = sys.create_collection(name, root, file, code, None)?;
+            println!("created collection [{id}] {name} ({})", props::code_label(code));
+            if let Some(f) = inpx {
+                cmd_import_inpx(&[file.to_string_lossy().into_owned(), f, "--root".into(), root.to_string_lossy().into_owned()])?;
+                let db = Db::open(file)?;
+                sys.set_data_version(id, db.get_prop_int(props::PROP_DATAVERSION)?)?;
+            }
+            Ok(())
+        }
+        Some("register") => {
+            let name = args.get(2).ok_or(USAGE)?;
+            let file = Path::new(args.get(3).ok_or(USAGE)?);
+            let root = Path::new(args.get(4).ok_or(USAGE)?);
+            let id = sys.register_collection(file, name, root)?;
+            println!("registered collection [{id}] {name}");
+            Ok(())
+        }
+        Some("delete") => {
+            let id: i64 = args.get(2).ok_or(USAGE)?.parse()?;
+            let remove = args.iter().any(|a| a == "--remove-file");
+            if sys.collection(id)?.is_none() {
+                return Err(format!("no collection with id {id}").into());
+            }
+            sys.delete_collection(id, remove)?;
+            println!("deleted collection [{id}]{}", if remove { " and its database file" } else { "" });
+            Ok(())
+        }
+        Some(_) => Err(USAGE.into()),
+    }
+}
+
 fn print_usage() {
     eprintln!(
         "myhomelib — data-layer + FB2/FBD CLI\n\
@@ -209,7 +337,9 @@ fn print_usage() {
          \x20 myhomelib stats   <db-path>\n\
          \x20 myhomelib import  <db-path> <dir> [--register-genres]\n\
          \x20 myhomelib genres  <db-path> [--seed | --file <path>]\n\
-         \x20 myhomelib export  <db-path> <book-id> <out.fb2>"
+         \x20 myhomelib export  <db-path> <book-id> <out.fb2>\n\
+         \x20 myhomelib import-inpx <db-path> <file.inpx> [--root <books-dir>]\n\
+         \x20 myhomelib collections <user.dbs2> [list | create … | register … | delete …]"
     );
 }
 

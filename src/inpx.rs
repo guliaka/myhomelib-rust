@@ -508,6 +508,9 @@ pub fn import_inpx(db: &Db, inpx: &Path, opts: &InpxOptions, progress: &JobProgr
     // The DAO computes the Search* columns itself, so the schema triggers are pure overhead here
     // (the original's StartBatchUpdate / FinishBatchUpdate pair).
     db.set_triggers_enabled(false);
+    // `Books` carries ~20 indexes; with SQLite's default 2 MB page cache a large import spends most of
+    // its time re-reading index pages. Give this (import-only) connection a 256 MB cache.
+    let _ = db.connection().execute_batch("PRAGMA cache_size = -262144; PRAGMA temp_store = MEMORY;");
     let outcome = (|| -> Result<()> {
         for (file_idx, name) in inp_names.iter().enumerate() {
             progress.info(format!("Обрабатываем файл {name}"));
