@@ -6,6 +6,8 @@ use egui::{
     Sense, SidePanel, Stroke, TextEdit, TopBottomPanel, Visuals, Window,
 };
 
+use std::collections::HashMap;
+
 use crate::core::Book;
 
 use crate::librusec::queue::ItemStatus;
@@ -450,36 +452,49 @@ fn size_str(bytes: Option<i64>) -> String {
     }
 }
 
-/// A column in the book grid: header label, pixel width, and whether its cells are center-aligned.
+/// How a grid column's cells are drawn.
+#[derive(Clone, Copy, PartialEq)]
+enum ColKind {
+    Text,
+    /// The rating column — drawn as five vector stars (the original's "Моя оценка").
+    Stars,
+}
+
+/// A column in the book grid: header label, pixel width, alignment, and how its cells render.
 struct GridCol {
     header: &'static str,
     width: f32,
     center: bool,
+    kind: ColKind,
 }
 
-/// Column layout for the book grid. The narrow columns have fixed widths; "Title" absorbs the leftover
-/// panel width so the grid spans the full central area like the original's TBookTree.
+/// Column layout for the book grid — the original's set/order: Title (no header) / № / Размер /
+/// Моя оценка / Добавлено / Жанр. The narrow columns have fixed widths; "Title" absorbs the leftover
+/// panel width. If the total exceeds the panel, the grid scrolls horizontally like the original.
 fn book_grid_columns(available: f32) -> Vec<GridCol> {
-    let fixed = 45.0 + 78.0 + 64.0 + 92.0; // #, size, rating, added-date
+    let fixed = 45.0 + 78.0 + 92.0 + 92.0 + 210.0; // №, size, rating(stars), added-date, genre
     let title_w = (available - fixed).max(180.0);
     vec![
-        GridCol { header: "Название", width: title_w, center: false },
-        GridCol { header: "№", width: 45.0, center: true },
-        GridCol { header: "Размер", width: 78.0, center: true },
-        GridCol { header: "Рейтинг", width: 64.0, center: true },
-        GridCol { header: "Добавлено", width: 92.0, center: false },
+        GridCol { header: "", width: title_w, center: false, kind: ColKind::Text },
+        GridCol { header: "№", width: 45.0, center: true, kind: ColKind::Text },
+        GridCol { header: "Размер", width: 78.0, center: true, kind: ColKind::Text },
+        GridCol { header: "Моя оценка", width: 92.0, center: true, kind: ColKind::Stars },
+        GridCol { header: "Добавлено", width: 92.0, center: false, kind: ColKind::Text },
+        GridCol { header: "Жанр", width: 210.0, center: false, kind: ColKind::Text },
     ]
 }
 
-/// Cell text for a book, in the same order as [`book_grid_columns`].
-fn book_cell_texts(b: &Book) -> Vec<String> {
+/// Cell text for a book, in the same order as [`book_grid_columns`]. The rating column returns an empty
+/// string — it is drawn as stars by [`render_book_row`], not as text.
+fn book_cell_texts(b: &Book, genre: &str) -> Vec<String> {
     vec![
         b.title.clone(),
         b.seq_number.map(|n| n.to_string()).unwrap_or_else(|| "—".to_string()),
         size_str(b.book_size),
-        if b.rate > 0 { b.rate.to_string() } else { "—".to_string() },
+        String::new(), // rating column — drawn as stars, not text
         // update_date is a formatted string (e.g. "2026-01-01 00:00:00"); show the date part only.
         b.update_date.split(' ').next().unwrap_or("").to_string(),
+        genre.to_string(),
     ]
 }
 
@@ -491,56 +506,65 @@ fn render_book_grid(ui: &mut egui::Ui, state: &mut State) {
     let total_w: f32 = cols.iter().map(|c| c.width).sum();
     let row_h = ui.text_style_height(&egui::TextStyle::Body);
 
-    // Header row (non-scrolling) with a bottom rule.
-    {
-        let (hrect, _hresp) = ui.allocate_exact_size(egui::vec2(total_w, row_h), Sense::hover());
-        let origin = hrect.min;
-        let font_id = egui::TextStyle::Body.resolve(ui.ctx().style().as_ref());
-        let mut x = 0.0_f32;
-        for c in &cols {
-            let cell = Rect::from_min_size(
-                egui::pos2(origin.x + x, origin.y),
-                egui::vec2(c.width, row_h),
-            );
-            let (anchor_pos, anchor) = if c.center {
-                (cell.center(), Align2::CENTER_CENTER)
-            } else {
-                (cell.min, Align2::LEFT_CENTER)
-            };
-            ui.painter()
-                .with_clip_rect(cell)
-                .text(anchor_pos, anchor, c.header, font_id.clone(), Color32::BLACK);
-            x += c.width;
-        }
-        let y = origin.y + row_h;
-        ui.painter().line_segment(
-            [egui::pos2(origin.x, y), egui::pos2(origin.x + total_w, y)],
-            Stroke::new(1.0_f32, Color32::from_rgb(160, 160, 160)),
-        );
-    }
-
-    let total = state.list_total as usize;
-    if total == 0 {
-        ui.add_space(4.0);
-        ui.label(RichText::new("No books.").weak());
-        return;
-    }
-    let grid_row_h = row_h + 3.0;
-    ScrollArea::vertical().show_rows(ui, grid_row_h, total, |ui, range| {
-        // Materialize only the visible slice (cached) — O(visible rows), not O(library).
-        let win = state.books_range(range.start as i64, (range.end - range.start) as i64);
-        for b in win.iter() {
-            let is_sel = state.selected_book_id == Some(b.book_id); // shared borrow; ends here
-            if render_book_row(ui, b, &cols, is_sel) {
-                state.select_book_id(b.book_id); // mutable borrow
+    // Horizontal scroll so the Жанр column can extend past a narrow window, like the original. Inside,
+    // the header + vertical `show_rows` grid share the same (scrollable) width.
+    ScrollArea::horizontal().show(ui, |ui| {
+        // Header row (scrolls horizontally with the body) with a bottom rule.
+        {
+            let (hrect, _hresp) = ui.allocate_exact_size(egui::vec2(total_w, row_h), Sense::hover());
+            let origin = hrect.min;
+            let font_id = egui::TextStyle::Body.resolve(ui.ctx().style().as_ref());
+            let mut x = 0.0_f32;
+            for c in &cols {
+                let cell = Rect::from_min_size(
+                    egui::pos2(origin.x + x, origin.y),
+                    egui::vec2(c.width, row_h),
+                );
+                if !c.header.is_empty() {
+                    let (anchor_pos, anchor) = if c.center {
+                        (cell.center(), Align2::CENTER_CENTER)
+                    } else {
+                        (cell.min, Align2::LEFT_CENTER)
+                    };
+                    ui.painter()
+                        .with_clip_rect(cell)
+                        .text(anchor_pos, anchor, c.header, font_id.clone(), Color32::BLACK);
+                }
+                x += c.width;
             }
+            let y = origin.y + row_h;
+            ui.painter().line_segment(
+                [egui::pos2(origin.x, y), egui::pos2(origin.x + total_w, y)],
+                Stroke::new(1.0_f32, Color32::from_rgb(160, 160, 160)),
+            );
         }
+
+        let total = state.list_total as usize;
+        if total == 0 {
+            ui.add_space(4.0);
+            ui.label(RichText::new("No books.").weak());
+            return;
+        }
+        let grid_row_h = row_h + 3.0;
+        ScrollArea::vertical().show_rows(ui, grid_row_h, total, |ui, range| {
+            // Materialize only the visible slice (cached) — O(visible rows), not O(library).
+            let win = state.books_range(range.start as i64, (range.end - range.start) as i64);
+            // Genre labels for this window (one batch query per scroll position; cached in state).
+            let genres: HashMap<i64, String> = state.genre_map().clone();
+            for b in win.iter() {
+                let g = genres.get(&b.book_id).map(|s| s.as_str()).unwrap_or("");
+                let is_sel = state.selected_book_id == Some(b.book_id); // shared borrow; ends here
+                if render_book_row(ui, b, &cols, is_sel, g) {
+                    state.select_book_id(b.book_id); // mutable borrow
+                }
+            }
+        });
     });
 }
 
 /// Draw one grid row as clipped fixed-width cells with a full-row selection/hover highlight (the
 /// original uses toFullRowSelect). Returns true if the row was clicked.
-fn render_book_row(ui: &mut egui::Ui, b: &Book, cols: &[GridCol], is_selected: bool) -> bool {
+fn render_book_row(ui: &mut egui::Ui, b: &Book, cols: &[GridCol], is_selected: bool, genre: &str) -> bool {
     let row_h = ui.text_style_height(&egui::TextStyle::Body) + 3.0;
     let total_w: f32 = cols.iter().map(|c| c.width).sum();
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(total_w, row_h), Sense::click());
@@ -553,24 +577,75 @@ fn render_book_row(ui: &mut egui::Ui, b: &Book, cols: &[GridCol], is_selected: b
 
     let font_id = egui::TextStyle::Body.resolve(ui.ctx().style().as_ref());
     let text_color = if is_selected { Color32::WHITE } else { Color32::BLACK };
-    let texts = book_cell_texts(b);
+    let texts = book_cell_texts(b, genre);
     let mut x = 0.0_f32;
     for (c, t) in cols.iter().zip(texts.iter()) {
         let cell = Rect::from_min_size(
             egui::pos2(rect.min.x + x, rect.min.y),
             egui::vec2(c.width, row_h),
         );
-        let (anchor_pos, anchor) = if c.center {
-            (cell.center(), Align2::CENTER_CENTER)
+        if c.kind == ColKind::Stars {
+            draw_stars(ui.painter(), cell, b.rate, is_selected);
         } else {
-            (cell.min, Align2::LEFT_CENTER)
-        };
-        ui.painter()
-            .with_clip_rect(cell)
-            .text(anchor_pos, anchor, t, font_id.clone(), text_color);
+            let (anchor_pos, anchor) = if c.center {
+                (cell.center(), Align2::CENTER_CENTER)
+            } else {
+                (cell.min, Align2::LEFT_CENTER)
+            };
+            ui.painter()
+                .with_clip_rect(cell)
+                .text(anchor_pos, anchor, t, font_id.clone(), text_color);
+        }
         x += c.width;
     }
     resp.clicked()
+}
+
+/// Draw a 5-star rating (the original's "Моя оценка") as small vector stars — filled for rated, outline
+/// for unrated. Vector shapes (not glyphs) so it renders regardless of the font's symbol coverage.
+fn draw_stars(painter: &egui::Painter, cell: Rect, rate: i32, selected: bool) {
+    const N: usize = 5;
+    let r_outer = 5.0_f32;
+    let gap = 4.0_f32;
+    let step = r_outer * 2.0 + gap;
+    let total_w = (N as f32 - 1.0) * step + r_outer * 2.0;
+    let cy = cell.center().y;
+    let x0 = cell.center().x - total_w / 2.0;
+    let fill = if selected { Color32::WHITE } else { Color32::from_rgb(255, 196, 0) };
+    let outline = if selected { Color32::WHITE } else { Color32::from_rgb(160, 160, 160) };
+    let rated = rate.clamp(0, 5) as usize;
+    for i in 0..N {
+        let cx = x0 + r_outer + i as f32 * step;
+        // A closed PathShape tessellates the concave star correctly (a convex polygon would not).
+        let pts = star_points(cx, cy, r_outer);
+        if i < rated {
+            painter.add(egui::Shape::Path(egui::epaint::PathShape {
+                points: pts,
+                closed: true,
+                fill,
+                stroke: egui::epaint::PathStroke::from(Stroke::new(1.0_f32, fill)),
+            }));
+        } else {
+            painter.add(egui::Shape::Path(egui::epaint::PathShape {
+                points: pts,
+                closed: true,
+                fill: Color32::TRANSPARENT,
+                stroke: egui::epaint::PathStroke::from(Stroke::new(1.0_f32, outline)),
+            }));
+        }
+    }
+}
+
+/// The 10 vertices (outer/inner alternating) of a 5-pointed star centered at `(cx, cy)`, point-up.
+fn star_points(cx: f32, cy: f32, r_outer: f32) -> Vec<egui::Pos2> {
+    let r_inner = r_outer * 0.4;
+    (0..10)
+        .map(|i| {
+            let ang = (-90.0_f32 + i as f32 * 36.0).to_radians();
+            let r = if i % 2 == 0 { r_outer } else { r_inner };
+            egui::pos2(cx + ang.cos() * r, cy + ang.sin() * r)
+        })
+        .collect()
 }
 
 /// The main menu bar (the original's TMainMenu). Each top-level item opens a dropdown wired to the same

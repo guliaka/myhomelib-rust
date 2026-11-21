@@ -2,6 +2,8 @@
 //! uppercased `Search*` columns, and pagination. All writes compute the `Search*` columns in-app
 //! (via [`crate::core::search`]) so they are correct whether or not the schema's triggers fire.
 
+use std::collections::HashMap;
+
 use rusqlite::{params, params_from_iter, OptionalExtension, ToSql};
 
 use super::connection::Db;
@@ -373,6 +375,32 @@ impl Db {
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Genre labels for a set of books in ONE round-trip: `book_id -> "GenreA, GenreB"`. The grid's
+    /// Жанр column uses this so the visible slice costs one indexed query, not one per row.
+    pub fn book_genres_batch(&self, book_ids: &[i64]) -> Result<HashMap<i64, String>> {
+        let mut out = HashMap::new();
+        if book_ids.is_empty() {
+            return Ok(out);
+        }
+        let ph: Vec<String> = (0..book_ids.len()).map(|i| format!("?{}", i + 1)).collect();
+        let sql = format!(
+            "SELECT BookID, GROUP_CONCAT(GenreCode, ', ') FROM Genre_List \
+             WHERE BookID IN ({}) GROUP BY BookID",
+            ph.join(", ")
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(book_ids.iter().copied()), |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?))
+        })?;
+        for row in rows {
+            let (id, g) = row?;
+            if let Some(g) = g {
+                out.insert(id, g);
+            }
         }
         Ok(out)
     }

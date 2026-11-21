@@ -1,6 +1,7 @@
 //! GUI application state. Pure Rust (no egui dependency) so the navigation/search/stats logic is fully
 //! testable headlessly; [`crate::gui::view`] renders from this and mutates it on user interaction.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -119,6 +120,12 @@ pub struct State {
     pub list_total: i64,
     /// The book shown in the detail panel, by stable id (independent of scroll position / pagination).
     pub selected_book_id: Option<i64>,
+    // Genre labels for the currently-visible window, keyed by the same window identity as `win_books`,
+    // so the grid's Жанр column costs one batch query per scroll position — never one per row.
+    genre_win_key: Option<ListSource>,
+    genre_win_start: i64,
+    genre_win_count: i64,
+    win_genres: HashMap<i64, String>,
     /// Active search filters; when non-empty they override the tree selection.
     pub filters: SearchFilters,
     // Virtualized book-list window cache — only the visible slice is ever materialized in memory.
@@ -182,6 +189,10 @@ impl State {
             win_start: 0,
             win_count: 0,
             win_books: Vec::new(),
+            genre_win_key: None,
+            genre_win_start: 0,
+            genre_win_count: 0,
+            win_genres: HashMap::new(),
             tree_cache: std::array::from_fn(|_| Vec::new()),
             tree_built: [false; 6],
             tab: active_tab,
@@ -258,6 +269,23 @@ impl State {
         self.win_count = c;
         self.win_books = books.clone();
         books
+    }
+
+    /// Genre labels for the currently-visible window (see [`Self::win_books`]), cached per window so the
+    /// grid's Жанр column is one batch query per scroll position. Call after [`Self::books_range`].
+    pub fn genre_map(&mut self) -> &HashMap<i64, String> {
+        let fresh = self.genre_win_key == Some(self.list_source.clone())
+            && self.genre_win_start == self.win_start
+            && self.genre_win_count == self.win_count;
+        if !fresh {
+            let ids: Vec<i64> = self.win_books.iter().map(|b| b.book_id).collect();
+            let genres = self.db.book_genres_batch(&ids).unwrap_or_default();
+            self.win_genres = genres;
+            self.genre_win_key = Some(self.list_source.clone());
+            self.genre_win_start = self.win_start;
+            self.genre_win_count = self.win_count;
+        }
+        &self.win_genres
     }
 
     /// Select a tree node and load its books (clears any active search).
