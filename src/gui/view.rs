@@ -2,7 +2,7 @@
 //! can be driven headlessly in tests via `egui::Context::default()`.
 
 use egui::{
-    Align, Align2, CentralPanel, Color32, CornerRadius, Layout, ProgressBar, Rect, RichText, ScrollArea,
+    Align2, CentralPanel, Color32, CornerRadius, ProgressBar, Rect, RichText, ScrollArea,
     Sense, SidePanel, Stroke, TextEdit, TopBottomPanel, Visuals, Window,
 };
 
@@ -12,7 +12,7 @@ use crate::core::Book;
 
 use crate::librusec::queue::ItemStatus;
 
-use super::state::{author_display, State, TABS};
+use super::state::{author_display, Selection, State, TABS};
 
 /// Import action for the top-bar button. In the windowed build it opens a native folder picker and
 /// imports everything under it; in headless (non-gui) builds it only reports — there's no display to
@@ -71,43 +71,139 @@ fn apply_classic_theme(ctx: &egui::Context) {
     ctx.set_visuals(v);
 }
 
-/// Render one frame of the main window from `state`.
-pub fn render(ctx: &egui::Context, state: &mut State) {
+/// Which action a toolbar button performs. Most mirror the original's view/collection toggles, which are
+/// not yet wired in the port — they show their (original) tooltip; only a few map to real actions.
+enum TbarAction {
+    None,
+    SelectAll,
+    Settings,
+}
+
+/// One toolbar button: its bundled icon + original tooltip + dropdown flag + action.
+struct TbarButton {
+    name: &'static str,
+    tip: &'static str,
+    bytes: &'static [u8],
+    dropdown: bool,
+    action: TbarAction,
+}
+
+/// The toolbar in the original's exact order (16 buttons). Separators are drawn after the indices in
+/// [`TBAR_SEP_AFTER`]. Icons are the original's bundled 32x32 PNGs.
+const TBAR: [TbarButton; 16] = [
+    TbarButton { name: "read", tip: "Читать", bytes: include_bytes!("../../assets/icons-32/read1.png"), dropdown: false, action: TbarAction::None },
+    TbarButton { name: "toDownloadList", tip: "Добавить в список загрузок", bytes: include_bytes!("../../assets/icons-32/toDownloadList.png"), dropdown: false, action: TbarAction::None },
+    TbarButton { name: "sndToDevice", tip: "Отправить на устройство", bytes: include_bytes!("../../assets/icons-32/sndToDevice1.png"), dropdown: true, action: TbarAction::None },
+    TbarButton { name: "rusAlphabet", tip: "Кириллическая азбука", bytes: include_bytes!("../../assets/icons-32/ru1.png"), dropdown: false, action: TbarAction::None },
+    TbarButton { name: "engAlphabet", tip: "Латинская азбука", bytes: include_bytes!("../../assets/icons-32/en1.png"), dropdown: false, action: TbarAction::None },
+    TbarButton { name: "selectCollection", tip: "Выбрать коллекцию", bytes: include_bytes!("../../assets/icons-32/selectCollection1.png"), dropdown: true, action: TbarAction::None },
+    TbarButton { name: "addFavorite", tip: "Добавить в избранное", bytes: include_bytes!("../../assets/icons-32/toFavorites1.png"), dropdown: true, action: TbarAction::None },
+    TbarButton { name: "selectAll", tip: "Отметить все", bytes: include_bytes!("../../assets/icons-32/chekAll1.png"), dropdown: false, action: TbarAction::SelectAll },
+    TbarButton { name: "collapseList", tip: "Развернуть/Свернуть список", bytes: include_bytes!("../../assets/icons-32/refreshList1.png"), dropdown: false, action: TbarAction::None },
+    TbarButton { name: "tableMode", tip: "Переключить в режим \"таблица\"", bytes: include_bytes!("../../assets/icons-32/tableView1.png"), dropdown: false, action: TbarAction::None },
+    TbarButton { name: "hideDeleted", tip: "Скрыть удалённые книги", bytes: include_bytes!("../../assets/icons-32/deletedBooks1.png"), dropdown: false, action: TbarAction::None },
+    TbarButton { name: "localOnly", tip: "Показывать только загруженные книги", bytes: include_bytes!("../../assets/icons-32/local_files.png"), dropdown: false, action: TbarAction::None },
+    TbarButton { name: "infoPanel", tip: "Показать/скрыть панель информации о книге", bytes: include_bytes!("../../assets/icons-32/infoPanel1.png"), dropdown: false, action: TbarAction::None },
+    TbarButton { name: "updateCollections", tip: "Обновить коллекции", bytes: include_bytes!("../../assets/icons-32/update_collections.png"), dropdown: false, action: TbarAction::None },
+    TbarButton { name: "settings", tip: "Настройки приложения", bytes: include_bytes!("../../assets/icons-32/settings1.png"), dropdown: false, action: TbarAction::Settings },
+    TbarButton { name: "help", tip: "Помощь", bytes: include_bytes!("../../assets/icons-32/help.png"), dropdown: false, action: TbarAction::None },
+];
+
+/// Toolbar separator positions (0-based index of the button AFTER which a separator is drawn).
+const TBAR_SEP_AFTER: [usize; 7] = [2, 4, 5, 6, 8, 12, 13];
+
+/// Per-context cache of decoded+uploaded toolbar-icon textures. egui's texture manager allocates a NEW id
+/// on every `load_texture`, so we load each icon once per context and reuse the handle afterwards.
+pub struct IconCache {
+    handles: HashMap<&'static str, egui::TextureHandle>,
+}
+
+impl Default for IconCache {
+    fn default() -> Self {
+        Self { handles: HashMap::new() }
+    }
+}
+
+/// Get (decoding + uploading once per context) the texture handle for a bundled toolbar icon.
+fn icon_texture(ctx: &egui::Context, cache: &mut IconCache, name: &'static str, bytes: &[u8]) -> egui::TextureHandle {
+    if let Some(h) = cache.handles.get(name) {
+        return h.clone();
+    }
+    let color_image = decode_icon(bytes);
+    let handle = ctx.load_texture(name, color_image, egui::TextureOptions::LINEAR);
+    cache.handles.insert(name, handle.clone());
+    handle
+}
+
+/// Decode a bundled toolbar-icon PNG into an egui image. The `image` crate is gui-only, so headless
+/// (non-gui) builds render a neutral placeholder instead — the toolbar layout still renders in tests.
+#[cfg(feature = "gui")]
+fn decode_icon(bytes: &[u8]) -> egui::ColorImage {
+    match image::load_from_memory(bytes) {
+        Ok(img) => {
+            let rgba = img.to_rgba8();
+            let (w, h) = rgba.dimensions();
+            egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba.into_raw())
+        }
+        Err(_) => icon_placeholder(),
+    }
+}
+
+#[cfg(not(feature = "gui"))]
+fn decode_icon(_bytes: &[u8]) -> egui::ColorImage {
+    icon_placeholder()
+}
+
+/// A neutral 16x16 gray block used when an icon can't be (or needn't be) decoded.
+fn icon_placeholder() -> egui::ColorImage {
+    let rgb = vec![180u8; 16 * 16 * 3];
+    egui::ColorImage::from_rgb([16, 16], &rgb)
+}
+
+/// Render one frame of the main window from `state` (and its per-context icon cache).
+pub fn render(ctx: &egui::Context, state: &mut State, icons: &mut IconCache) {
     apply_classic_theme(ctx);
     // Menu bar — the original's TMainMenu (Книга / Коллекция / Группа / Редактирование / Вид / Инструменты / Помощь).
     TopBottomPanel::top("menubar").show(ctx, |ui| {
         render_menu_bar(ui, state);
     });
 
-    // Icon toolbar — the key actions as compact buttons (the original uses icon toolbars; we use short
-    // labels since its icon assets aren't bundled) plus the collection count on the right.
+    // Icon toolbar — the original's TToolBar: its exact set of icon buttons in order, grouped by
+    // separators, each with its original tooltip. Icons are the original's bundled 32x32 PNGs.
     TopBottomPanel::top("toolbar").show(ctx, |ui| {
         ui.horizontal(|ui| {
-            if ui.button("Импорт…").clicked() {
-                do_import(state);
+            for (i, btn) in TBAR.iter().enumerate() {
+                let handle = icon_texture(ctx, icons, btn.name, btn.bytes);
+                let resp = ui.add_sized(egui::vec2(30.0, 30.0), egui::Image::new(&handle).sense(Sense::click()));
+                if btn.dropdown {
+                    // small down-arrow at the button's right edge (the original's tbsDropDown buttons)
+                    let r = resp.rect;
+                    let ax = r.max.x - 2.0;
+                    let ay = r.center().y;
+                    let color = Color32::from_rgb(90, 90, 90);
+                    ui.painter().add(egui::Shape::Path(egui::epaint::PathShape {
+                        points: vec![
+                            egui::pos2(ax - 3.0, ay - 2.0),
+                            egui::pos2(ax + 1.0, ay - 2.0),
+                            egui::pos2(ax - 1.0, ay + 2.0),
+                        ],
+                        closed: true,
+                        fill: color,
+                        stroke: egui::epaint::PathStroke::from(Stroke::new(1.0_f32, color)),
+                    }));
+                }
+                if resp.clicked() {
+                    match btn.action {
+                        TbarAction::SelectAll => state.select(Selection::All),
+                        TbarAction::Settings => state.show_settings = true,
+                        TbarAction::None => {}
+                    }
+                }
+                resp.on_hover_text(btn.tip);
+                if TBAR_SEP_AFTER.contains(&i) {
+                    ui.separator();
+                }
             }
-            ui.separator();
-            if ui.button("Удалить").clicked() {
-                state.delete_selected_book();
-            }
-            ui.separator();
-            if ui.button("Поиск").clicked() {
-                state.set_tab(3);
-            }
-            ui.separator();
-            if ui.button("Онлайн").clicked() {
-                state.show_online = true;
-            }
-            ui.separator();
-            if ui.button("Статистика").clicked() {
-                state.show_stats = true;
-            }
-            if ui.button("Настройки").clicked() {
-                state.show_settings = true;
-            }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.label(RichText::new(format!("Коллекция: {} книг", state.total_books())).weak());
-            });
         });
     });
 

@@ -20,6 +20,8 @@ quick-xml = "0.42.0"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking"] }
 rusqlite = { version = "0.31", features = ["functions", "collation"] }
 rfd = { version = "0.15", optional = true }
+# PNG decoding for the bundled toolbar icons (pure Rust, PNG-only — no native deps). gui-only.
+image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
 thiserror = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -38,7 +40,7 @@ bundled = ["rusqlite/bundled"]
 # Windowed eframe GUI (pulls winit/GL). The pure-egui view + state logic and its headless tests build
 # without this; only the native window runner needs it. Off by default so `cargo build`/`cargo test`
 # work on headless machines and the CLI stays dependency-light.
-gui = ["dep:eframe", "dep:rfd"]
+gui = ["dep:eframe", "dep:rfd", "dep:image"]
 
 [profile.release]
 # Single self-contained Windows .exe is the end goal; keep it lean.

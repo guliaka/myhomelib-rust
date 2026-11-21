@@ -5,9 +5,11 @@
 use crate::db::Db;
 use crate::gui::{state, view};
 
-/// The eframe application: owns a [`State`] and forwards each frame to [`view::render`].
+/// The eframe application: owns a [`State`], a per-context icon cache, and forwards each frame to
+/// [`view::render`].
 pub struct MyHomeLibApp {
     state: state::State,
+    icons: view::IconCache,
 }
 
 impl MyHomeLibApp {
@@ -15,13 +17,14 @@ impl MyHomeLibApp {
         let db = Db::open(db_path)?;
         Ok(Self {
             state: state::State::new(db, db_path),
+            icons: view::IconCache::default(),
         })
     }
 }
 
 impl eframe::App for MyHomeLibApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        view::render(ctx, &mut self.state);
+        view::render(ctx, &mut self.state, &mut self.icons);
         // eframe repaints on input; no extra timer is needed. (Window-size auto-save is deferred —
         // the persisted size in `<db>.ini` is still read on launch.)
     }

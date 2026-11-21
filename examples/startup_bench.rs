@@ -74,7 +74,8 @@ fn main() {
     // First headless render frame — the virtualized list fetches only the visible window.
     let t_render = Instant::now();
     let ctx = egui::Context::default();
-    let _ = ctx.run(egui::RawInput::default(), |ctx| myhomelib::gui::view::render(ctx, &mut state));
+    let mut icons = myhomelib::gui::view::IconCache::default();
+    let _ = ctx.run(egui::RawInput::default(), |ctx| myhomelib::gui::view::render(ctx, &mut state, &mut icons));
     println!("first render frame:     {:?}", t_render.elapsed());
 
     // Tree nodes per tab (aggregate COUNT GROUP BY over the whole collection) — first build of each.

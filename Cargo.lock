@@ -2249,6 +2249,7 @@ dependencies = [
  "chrono",
  "eframe",
  "egui",
+ "image",
  "quick-xml 0.42.0",
  "reqwest",
  "rfd",

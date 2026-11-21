@@ -212,6 +212,7 @@ fn render_smoke_headless() {
 
     let ctx = egui::Context::default();
     // Frame 1: default. Frame 2: a book selected (detail panel). Frame 3: stats dialog open.
+    let mut icons = view::IconCache::default();
     for frame in 0..3 {
         if frame == 0 && state.list_total > 0 {
             if let Some(b) = state.books_range(0, 1).into_iter().next() {
@@ -221,14 +222,14 @@ fn render_smoke_headless() {
         if frame == 2 {
             state.show_stats = true;
         }
-        let _ = ctx.run(egui::RawInput::default(), |ctx| view::render(ctx, &mut state)); // no panic
+        let _ = ctx.run(egui::RawInput::default(), |ctx| view::render(ctx, &mut state, &mut icons)); // no panic
     }
 
     // Walk every page-control tab and render it headlessly — catches a panic in any per-tab layout
     // (menu/toolbar/tab-bar/nav/search/downloads) that the single default-frame loop above doesn't reach.
     for t in 0..TABS.len() {
         state.set_tab(t);
-        let _ = ctx.run(egui::RawInput::default(), |ctx| view::render(ctx, &mut state)); // no panic
+        let _ = ctx.run(egui::RawInput::default(), |ctx| view::render(ctx, &mut state, &mut icons)); // no panic
     }
 
     drop(state);
@@ -291,7 +292,8 @@ fn online_search_queue_and_config() {
     state.downloads.set_progress(id, 50, Some(100));
     state.show_online = true;
     let ctx = egui::Context::default();
-    let _ = ctx.run(egui::RawInput::default(), |ctx| view::render(ctx, &mut state)); // no panic
+    let mut icons = view::IconCache::default();
+    let _ = ctx.run(egui::RawInput::default(), |ctx| view::render(ctx, &mut state, &mut icons)); // no panic
 
     drop(state);
     let _ = std::fs::remove_dir_all(&dir);

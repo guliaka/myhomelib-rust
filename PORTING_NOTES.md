@@ -165,6 +165,20 @@ very bottom. Virtualization is unchanged — only the visible slice is ever mate
 *Known delta:* «Группы» currently shows the folder tree (the original's user-defined groups aren't ported; folders
 are the closest existing organization).
 
+### D15 — Grid = original's exact columns (incl. star rating + genre) + real icon toolbar, on `devel`
+The book grid now matches the original's column set exactly: **Title** (no header) / **№** / **Размер** /
+**Моя оценка** (five vector stars — filled for rated, outline for unrated; orange, white-on-selection) /
+**Добавлено** / **Жанр**. Genres cost one batched `GROUP_CONCAT … IN (visible ids)` query per visible window
+(cached in `State` keyed by window identity), so the grid stays O(visible rows) at 1M+ scale — never one query
+per row. The toolbar now uses the original's real icon art: its bundled 32×32 PNGs (`assets/icons-32/`) decoded
+with the pure-Rust `image` crate (png-only, gui-only dep) and cached as `TextureHandle`s per context in
+`MyHomeLibApp` — egui's texture manager allocates a new id on every `load_texture`, so re-loading each frame would
+leak. The 16 buttons are in the original's order with separators + their original tooltips; the three
+`tbsDropDown` buttons draw a small caret. Only two actions are wired (SelectAll, Settings) — the rest mirror the
+original's view/collection toggles and show their tooltip until ported. Headless (non-gui) builds render a neutral
+placeholder per icon since `image` is gui-only. *Known delta:* egui draws flat widgets, so the toolbar/menu can't
+be pixel-identical to beveled native Win32 controls — this is the closest achievable in pure egui.
+
 ---
 
 ## Faithful behavior recovered from the original source
@@ -248,3 +262,11 @@ These were read from the FreePascal source, not guessed — implementers should 
   smoke test now walks all six tabs (menu/toolbar/tab-bar/nav/search/downloads paths) without panic. `cargo test`
   green (34 total), `cargo build` and `cargo build --features gui` clean with no warnings on either feature set.
   Visual verification on a real Windows box is still pending (headless here).
+- **GUI G5 — original grid columns + real icon toolbar (D15, on `devel`)** — Re-added the original's exact
+  book-grid columns: Title / № / Размер / Моя оценка (five vector stars) / Добавлено / Жанр, with genres from a
+  single batched query per visible window (`book_genres_batch`, cached in `State`). The toolbar now renders the
+  original's real bundled 32×32 PNG icons (decoded via the pure-Rust `image` crate, cached as `TextureHandle`s per
+  context; decode is cfg-gated so headless builds use a placeholder). All six tabs + the icon toolbar render
+  headlessly without panic. `cargo test` green (34 total) and `cargo build` / `cargo build --features gui` clean
+  with no warnings on either feature set; all 16 bundled icons verified valid PNGs. Visual verification on a real
+  Windows box is still pending (headless here).
