@@ -18,7 +18,7 @@ with a reason — nothing is dropped silently.
 | 3 | Headless import/export (`import.rs`, `export.rs`) | ✅ done | Folder + FBD import (extract title/authors/genre/lang/series/annotation, dedupe by source-file identity), metadata export to FB2. INPX import, device export, and background threads/progress deferred to the GUI phases. `cargo test` green incl. import/export round-trip. |
 | 4 | GUI shell + tree navigation (egui) | ✅ done | egui main window: category tabs (Authors/Genres/Series/Folders) + node tree with counts, book list, detail panel, search box, soft-delete. State is pure Rust (headless-tested); view is pure egui; eframe runner behind the `gui` feature. Add/edit dialogs deferred to Phase 5. |
 | 5 | Search UI, settings, stats | ✅ done | Multi-field search (title/author/lang/ext/local-only), statistics dialog (totals + by-lang/by-ext breakdowns via in-use counts), settings persisted to `<db>.ini` (readers, active tab, window size) matching the original's `TMHLSettings`. Named search presets deferred. `cargo test` green incl. search/stats/settings round-trip. |
-| 6 | Librusec client + download queue (`librusec/`) | ⬜ todo | Remote browse/search, queued downloads with progress/cancel/resume. |
+| 6 | Librusec client + download queue (`librusec/`) | ✅ done | Connection-script engine (GET/POST/ADD/CHECK/REDIR/PAUSE) + macro substitution, INPX catalog parser, background search + download queue with progress/cancel. GUI Online tab wired. Engine is pure Rust, unit-tested vs a mock transport; live HTTP via reqwest (rustls). `cargo test` green (7 librusec + online GUI). |
 | 7 | Polish + performance | ⬜ todo | Startup profiling (<10 s), lazy loading, Windows cross-build verified. |
 
 ---
@@ -102,6 +102,25 @@ format and parse it with an exact port of the original's algorithm (`genres::par
 - **Pull from FB2 on import** — `myhomelib import <db> <dir> --register-genres` also registers each book's
   `<genre>` code in the catalog if missing, so the list grows to reflect imported books.
 
+### D11 — Librusec = faithful connection-script engine + INPX catalog; pure-Rust core, thin live-HTTP edge
+The original's downloader (`Program/DwnldImpl/unit_Downloader.pas`) is not a fixed API client but a small
+**connection-script interpreter**: the user supplies a script of `GET url` / `POST url` / `ADD name value` /
+`CHECK` / `REDIR` / `PAUSE ms` commands, and macros (`%USER%`, `%PASS%`, `%URL%`, plus book fields) are
+substituted in. Two semantics carried over exactly:
+- **`%RESURL%` is substituted at execution time** (after a `GET` that redirects to the real download target),
+  not at parse time — so it must survive macro substitution untouched until the redirect is captured. A
+  `REDIR` command asserts such a redirect was seen (else `WrongCredentials`).
+- **`CHECK` validates the last response** (error-page detection) and saves it as the result body.
+
+The catalog feed is an **INPX** delimited text file: fields separated by `Chr(4)` (`\u{04}`), author parts by
+`:` then `,`, genre codes by `:`; a leading `Structure:` header declares field order + base URL, and each later
+line containing the field separator is one book record (see `librusec::catalog`).
+
+We keep the engine **network-free** (`command` / `catalog` / `queue` / `client`) and unit-test it against a mock
+`Transport`; only `librusec::service.rs` touches real HTTP, via `reqwest` pinned to `rustls-tls` + `blocking`
+(no OpenSSL DLLs on the Windows `.exe`, and the blocking API lets the GUI drive downloads from a worker thread).
+Resume / partial-download is deferred to Phase 7 polish.
+
 ---
 
 ## Faithful behavior recovered from the original source
@@ -156,3 +175,10 @@ These were read from the FreePascal source, not guessed — implementers should 
   `init` (seeds 79 genres) → `import --register-genres` (pulls a new genre into the catalog) → `genres`.
   `cargo build --features gui` compiles clean. 24 tests green total (2 lib + 5 dao + 6 fb2 + 5 gui + 5 genres
   + 1 import/export), no warnings.
+- **Phase 6** — `cargo test` (librusec: connection-script parse + macro substitution with `%RESURL%` left
+  intact, INPX catalog parse/search over the delimited format, download-queue state machine incl. progress/
+  cancel/cancel-all, and the client executing a script against a mock `Transport`; gui: background search poll
+  → results, queueing a book resolving its URL onto the catalog base, `[Librusec]` settings round-trip through
+  `<db>.ini` with a multi-line script, and a headless render of the Online panel with an in-flight download).
+  `cargo build --features gui` compiles clean. 32 tests green total (2 lib + 5 dao + 6 fb2 + 6 gui + 5 genres
+  + 1 import/export + 7 librusec), no warnings.

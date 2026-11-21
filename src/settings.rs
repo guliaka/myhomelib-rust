@@ -108,6 +108,7 @@ impl Default for Settings {
 const GENERAL: &str = "General";
 const READERS: &str = "Readers"; // matches the original's READERS_SECTION
 const DIRS: &str = "Dirs";
+const LIBRUSEC: &str = "Librusec";
 
 impl Settings {
     /// The INI path for a collection DB — `<db-path>.ini` (the original appends ".ini" to the db name).
@@ -188,5 +189,41 @@ impl Settings {
 
     pub fn set_last_import_dir(&mut self, dir: &str) {
         self.ini.set(DIRS, "import", dir);
+    }
+
+    // -- Librusec (online collection) --------------------------------------
+    /// Credentials + base URL + connection script for the online library (the original stores these as
+    /// per-collection properties `LibUser`/`LibPassword`/`URL`/`ConnectionScript`).
+    pub fn librusec_user(&self) -> String {
+        self.ini.get(LIBRUSEC, "user").unwrap_or("").to_string()
+    }
+
+    pub fn set_librusec_user(&mut self, v: &str) {
+        self.ini.set(LIBRUSEC, "user", v);
+    }
+
+    pub fn librusec_password(&self) -> String {
+        self.ini.get(LIBRUSEC, "password").unwrap_or("").to_string()
+    }
+
+    pub fn set_librusec_password(&mut self, v: &str) {
+        self.ini.set(LIBRUSEC, "password", v);
+    }
+
+    pub fn librusec_url(&self) -> String {
+        self.ini.get(LIBRUSEC, "url").unwrap_or("").to_string()
+    }
+
+    pub fn set_librusec_url(&mut self, v: &str) {
+        self.ini.set(LIBRUSEC, "url", v);
+    }
+
+    /// The connection script; newlines are stored as literal `\n` so the value stays on one INI line.
+    pub fn librusec_script(&self) -> String {
+        self.ini.get(LIBRUSEC, "script").map(|s| s.replace("\\n", "\n")).unwrap_or_default()
+    }
+
+    pub fn set_librusec_script(&mut self, v: &str) {
+        self.ini.set(LIBRUSEC, "script", &v.replace('\n', "\\n"));
     }
 }

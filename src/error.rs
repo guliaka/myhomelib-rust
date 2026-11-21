@@ -10,6 +10,21 @@ pub enum AppError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
+    #[error("http error: {0}")]
+    Http(String),
+
+    #[error("download cancelled")]
+    Cancelled,
+
+    #[error("bad credentials (no download redirect captured)")]
+    WrongCredentials,
+
+    #[error("download blocked by server")]
+    BlockedByServer,
+
+    #[error("no response to check")]
+    NoResponse,
+
     #[error("{0}")]
     Other(String),
 }

@@ -3,7 +3,8 @@
 Rust rewrite of [MyHomeLib](https://github.com/guliaka/MyHomeLib.git) — a home e-book library
 manager (FreePascal/Lazarus original). Caters to FB2/FBD collections and Librusec-based libraries.
 
-**Status: Phases 1–5 of 7** — data layer, FB2/FBD engine, headless import/export, the egui GUI, and search/settings/statistics.
+**Status: Phases 1–6 of 7** — data layer, FB2/FBD engine, headless import/export, the egui GUI,
+search/settings/statistics, and the Librusec online client (catalog search + download queue).
 See [`PORTING_NOTES.md`](./PORTING_NOTES.md) for the phase plan, decisions, and deferred items.
 
 ## Layout
@@ -15,15 +16,16 @@ src/
   genres.rs # built-in FB2 genre tree + file-format parser (seed / reload / pull-from-FB2)
   import.rs # headless catalog import (scan dir, extract metadata, dedupe by source file)
   export.rs # headless metadata export (rebuild an FB2 from a stored book)
-  settings.rs# user settings: minimal ordered INI store at `<db>.ini` (readers, tab, window size)
+  settings.rs# user settings: minimal ordered INI store at `<db>.ini` (readers, tab, window size, Librusec)
+  librusec/ # Librusec online client: connection-script engine, INPX catalog parser, download queue
   gui/      # egui GUI: state (pure Rust) + view (egui) + eframe window runner (`gui` feature)
   error.rs  # AppError
-  lib.rs    # library root (core, db, fb2, import, export, gui, error)
+  lib.rs    # library root (core, db, fb2, import, export, librusec, gui, error)
   main.rs   # CLI (init / books / stats / import / genres / export)
   bin/gui.rs# native GUI binary `myhomelib-gui` (behind the `gui` feature)
 schema/     # create_collection_db.sql — copied verbatim from the original
 assets/     # fb2_genres.txt — embedded initial genre list (standard FB2 codes + Russian aliases)
-tests/      # integration tests: data layer, FB2/FBD round-trip, import/export, headless GUI
+tests/      # integration tests: data layer, FB2/FBD round-trip, import/export, headless GUI, Librusec engine
 ```
 
 ## Build & test
@@ -49,12 +51,18 @@ cargo run -- genres  demo.db [--seed | --file list.txt]             # list / re-
 cargo run -- export  demo.db <book-id> out.fb2  # rebuild a book's metadata as FB2
 ```
 
-## GUI (Phases 4–5)
+## GUI (Phases 4–6)
 The windowed app is egui/eframe. The navigation **state** is pure Rust and the **view** is pure egui, so
 both are tested headlessly (`cargo test`). Only the native window runner needs winit/GL, behind the
 `gui` feature. Phase 5 adds a multi-field search (title / author / lang / ext / local-only), a
 statistics dialog (totals + by-language / by-extension breakdowns), and settings persisted to an INI at
 `<db>.ini` (reader associations, active tab, window size — matching the original's `TMHLSettings`).
+
+Phase 6 adds the **Online** tab: a Librusec connection editor (user / password / URL / connection
+script, persisted under `[Librusec]` in `<db>.ini`), a background catalog search over an INPX feed, and
+a download queue with per-item progress + cancel. The engine (connection-script interpreter, INPX
+parser, queue) is pure Rust and unit-tested against a mock transport; only the live HTTP edge uses
+`reqwest` (`rustls-tls`, no OpenSSL DLLs on Windows).
 
 ```sh
 cargo run --features gui --bin myhomelib-gui [db-path]   # open the GUI (needs a display)

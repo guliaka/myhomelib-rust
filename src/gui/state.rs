@@ -2,9 +2,12 @@
 //! testable headlessly; [`crate::gui::view`] renders from this and mutates it on user interaction.
 
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use crate::core::{Author, Book};
 use crate::db::{BookQuery, Db};
+use crate::librusec::catalog::{Catalog, CatalogBook};
+use crate::librusec::queue::DownloadQueue;
 use crate::settings::Settings;
 
 /// Which tree node is selected in the left panel.
@@ -97,12 +100,34 @@ pub struct State {
     pub show_settings: bool,
     pub reader_ext: String,
     pub reader_cmd: String,
+    // Online (Librusec) search + download queue.
+    pub show_online: bool,
+    pub online_query: String,
+    /// Last fetched catalog (so results can be re-filtered and books resolved for download).
+    pub online_catalog: Option<Catalog>,
+    /// Indices into `online_catalog.books` matching `online_query`.
+    pub online_results: Vec<usize>,
+    /// A background search thread writes a finished result here; the UI drains it via `poll_online`.
+    pub online_slot: Arc<Mutex<Option<crate::error::Result<Catalog>>>>,
+    /// Download queue for queued/active/finished online downloads.
+    pub downloads: DownloadQueue,
+    /// Editor buffers for the Librusec config in the Online panel.
+    pub lib_user: String,
+    pub lib_pass: String,
+    pub lib_url: String,
+    pub lib_script: String,
 }
 
 impl State {
     pub fn new(db: Db, db_path: impl Into<PathBuf>) -> Self {
         let db_path = db_path.into();
         let settings = Settings::load(&db_path);
+        // Read the persisted Librusec config before `settings` is moved into the struct below.
+        let active_tab = settings.active_tab().min(TABS.len() - 1);
+        let lib_user = settings.librusec_user();
+        let lib_pass = settings.librusec_password();
+        let lib_url = settings.librusec_url();
+        let lib_script = settings.librusec_script();
         let mut s = Self {
             db,
             db_path,
@@ -110,13 +135,23 @@ impl State {
             books: Vec::new(),
             selected_book: None,
             filters: SearchFilters::default(),
-            tab: settings.active_tab().min(TABS.len() - 1),
+            tab: active_tab,
             status: "Ready".to_string(),
             settings,
             show_stats: false,
             show_settings: false,
             reader_ext: String::new(),
             reader_cmd: String::new(),
+            show_online: false,
+            online_query: String::new(),
+            online_catalog: None,
+            online_results: Vec::new(),
+            online_slot: Arc::new(Mutex::new(None)),
+            downloads: DownloadQueue::new(),
+            lib_user,
+            lib_pass,
+            lib_url,
+            lib_script,
         };
         s.reload();
         s
@@ -270,6 +305,83 @@ impl State {
     pub fn save_window_size(&mut self, size: [f32; 2]) {
         self.settings.set_window_size(size);
         let _ = self.settings.save(&self.db_path);
+    }
+
+    // -- Online (Librusec) -------------------------------------------------
+
+    /// Drain a finished background search from `online_slot` into the results list.
+    pub fn poll_online(&mut self) {
+        if let Some(res) = self.online_slot.lock().ok().and_then(|mut g| g.take()) {
+            match res {
+                Ok(cat) => {
+                    self.online_results = cat.search(&self.online_query);
+                    self.online_catalog = Some(cat);
+                    self.status = format!(
+                        "{} online book(s) match “{}”",
+                        self.online_results.len(),
+                        self.online_query
+                    );
+                }
+                Err(e) => {
+                    self.online_catalog = None;
+                    self.online_results.clear();
+                    self.status = format!("online search failed: {e}");
+                }
+            }
+        }
+    }
+
+    /// Queue a catalog book (by index into `online_catalog`) for download; returns its queue id.
+    pub fn queue_download(&mut self, idx: usize) -> Option<u64> {
+        let cat = self.online_catalog.as_ref()?;
+        if idx >= cat.books.len() {
+            return None;
+        }
+        let book = &cat.books[idx];
+        let label = online_label(book);
+        let url = cat.resolve_url(book)?;
+        Some(self.downloads.enqueue(label, url))
+    }
+
+    /// Persist the Librusec config from the Online-panel inputs.
+    pub fn save_lib_config(&mut self) {
+        self.settings.set_librusec_user(&self.lib_user);
+        self.settings.set_librusec_password(&self.lib_pass);
+        self.settings.set_librusec_url(&self.lib_url);
+        self.settings.set_librusec_script(&self.lib_script);
+        let _ = self.settings.save(&self.db_path);
+        self.status = "Librusec settings saved".into();
+    }
+
+    /// Kick off a background catalog fetch (the network edge; not exercised by offline tests).
+    pub fn start_online_search(&mut self) {
+        let url = self.settings.librusec_url().trim().to_string();
+        if url.is_empty() {
+            self.status = "Set a Librusec URL in the Online panel first".into();
+            return;
+        }
+        let slot = self.online_slot.clone();
+        std::thread::spawn(move || {
+            let res = crate::librusec::service::fetch_catalog(&url);
+            if let Ok(mut g) = slot.lock() {
+                *g = Some(res);
+            }
+        });
+        self.status = "Searching online…".into();
+    }
+}
+
+/// `"Last First — Title"` display for a catalog book (title-only when there's no author).
+fn online_label(book: &CatalogBook) -> String {
+    let author = book
+        .authors
+        .first()
+        .map(|(l, f, _)| if f.is_empty() { l.clone() } else { format!("{l} {f}") })
+        .unwrap_or_default();
+    if author.trim().is_empty() {
+        book.title.clone()
+    } else {
+        format!("{} — {}", author.trim(), book.title)
     }
 }
 

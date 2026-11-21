@@ -11,6 +11,7 @@ pub mod fb2;
 pub mod genres;
 pub mod gui;
 pub mod import;
+pub mod librusec;
 pub mod settings;
 
 pub use db::{BookQuery, CollectionStats, Db};

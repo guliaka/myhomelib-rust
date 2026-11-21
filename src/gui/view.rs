@@ -2,8 +2,11 @@
 //! can be driven headlessly in tests via `egui::Context::default()`.
 
 use egui::{
-    Align, CentralPanel, Layout, RichText, ScrollArea, SidePanel, TextEdit, TopBottomPanel, Window,
+    Align, CentralPanel, Color32, Layout, ProgressBar, RichText, ScrollArea, SidePanel, TextEdit,
+    TopBottomPanel, Window,
 };
+
+use crate::librusec::queue::ItemStatus;
 
 use super::state::{author_display, State, TABS};
 
@@ -24,6 +27,9 @@ pub fn render(ctx: &egui::Context, state: &mut State) {
                 }
                 if ui.button("Settings").clicked() {
                     state.show_settings = true;
+                }
+                if ui.button("Online").clicked() {
+                    state.show_online = true;
                 }
             });
         });
@@ -249,6 +255,135 @@ pub fn render(ctx: &egui::Context, state: &mut State) {
                 }
             });
         state.show_settings = open;
+    }
+
+    // Online (Librusec) panel: connection config + search + results + download queue.
+    state.poll_online();
+    if state.show_online {
+        let mut open = true;
+        Window::new("Online library (Lib.rus.ec)")
+            .open(&mut open)
+            .min_size(egui::vec2(560.0, 440.0))
+            .show(ctx, |ui| {
+                ui.collapsing("Connection", |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("User");
+                        ui.add(TextEdit::singleline(&mut state.lib_user).desired_width(180.).hint_text("login"));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Password");
+                        ui.add(TextEdit::singleline(&mut state.lib_pass).desired_width(180.).password(true));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("URL");
+                        ui.add(TextEdit::singleline(&mut state.lib_url)
+                            .desired_width(300.)
+                            .hint_text("https://lib.rus.ec/…"));
+                    });
+                    ui.label("Connection script (one command per line: GET / POST / ADD / CHECK …)");
+                    ui.add(TextEdit::multiline(&mut state.lib_script)
+                        .desired_width(ui.available_width())
+                        .desired_rows(3));
+                    if ui.button("Save connection").clicked() {
+                        state.save_lib_config();
+                    }
+                });
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label("Search");
+                    ui.add(TextEdit::singleline(&mut state.online_query)
+                        .desired_width(260.)
+                        .hint_text("title or author"));
+                    if ui.button("Go").clicked() {
+                        state.start_online_search();
+                    }
+                });
+
+                // Results — gathered into owned rows first so the (mutating) download button doesn't
+                // fight a borrow of `state.online_catalog`.
+                let result_rows: Vec<(usize, String)> = if let Some(cat) = &state.online_catalog {
+                    state
+                        .online_results
+                        .iter()
+                        .filter_map(|&idx| {
+                            if idx < cat.books.len() {
+                                let b = &cat.books[idx];
+                                let author =
+                                    b.authors.first().map(|(l, f, _)| format!("{l} {f}")).unwrap_or_default();
+                                Some((idx, format!("{} — {}", author.trim(), b.title)))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                if !result_rows.is_empty() {
+                    ui.separator();
+                    ui.label(RichText::new(format!("{} result(s)", result_rows.len())).strong());
+                    ScrollArea::vertical().max_height(150.).show(ui, |ui| {
+                        for (idx, label) in &result_rows {
+                            ui.horizontal(|ui| {
+                                ui.label(label.as_str());
+                                if ui.button("↓ download").clicked() {
+                                    state.queue_download(*idx);
+                                }
+                            });
+                        }
+                    });
+                }
+
+                // Download queue.
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("Downloads ({})", state.downloads.len())).strong());
+                    if ui.add_enabled(state.downloads.pending() > 0, egui::Button::new("Cancel all")).clicked() {
+                        state.downloads.cancel_all();
+                    }
+                });
+                let rows: Vec<(u64, String, f64, String, bool)> = state
+                    .downloads
+                    .iter()
+                    .map(|it| {
+                        let (kind, frac) = match &it.status {
+                            ItemStatus::Queued => ("queued".to_string(), 0.0),
+                            ItemStatus::Active { .. } => ("downloading".to_string(), it.status.fraction()),
+                            ItemStatus::Done => ("done".to_string(), 1.0),
+                            ItemStatus::Failed(e) => (format!("failed: {e}"), 1.0),
+                            ItemStatus::Cancelled => ("cancelled".to_string(), 1.0),
+                        };
+                        let cancellable = matches!(it.status, ItemStatus::Queued | ItemStatus::Active { .. });
+                        (it.id, it.label.clone(), frac, kind, cancellable)
+                    })
+                    .collect();
+                if rows.is_empty() {
+                    ui.label(RichText::new("(nothing queued)").weak());
+                } else {
+                    ScrollArea::vertical().max_height(140.).show(ui, |ui| {
+                        for (id, label, frac, kind, cancellable) in rows {
+                            ui.horizontal(|ui| {
+                                if kind == "downloading" {
+                                    ui.add(ProgressBar::new(frac as f32).text(format!("{:.0}%", frac * 100.0)));
+                                } else {
+                                    let color = if kind.starts_with("failed") || kind == "cancelled" {
+                                        Color32::RED
+                                    } else {
+                                        Color32::LIGHT_GRAY
+                                    };
+                                    ui.colored_label(color, &kind);
+                                }
+                                ui.label(&label);
+                                if cancellable && ui.small_button("cancel").clicked() {
+                                    state.downloads.cancel(id);
+                                }
+                            });
+                        }
+                    });
+                }
+            });
+        state.show_online = open;
     }
 }
 
