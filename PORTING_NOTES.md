@@ -16,7 +16,7 @@ with a reason — nothing is dropped silently.
 | 1 | Skeleton + data layer (`core/`, `db/`) | ✅ done | rusqlite DAO, schema init, UDF/collation registration, CRUD + search + pagination. `cargo test` green; CLI smoke lists books. |
 | 2 | FB2/FBD engine (`fb2/`) | ✅ done | Lossless element-tree model (quick-xml parse, hand-rolled serialize), typed accessors (title/authors/genre/lang/annotation/cover), FBD = ZIP read/write. `cargo test` green incl. round-trip. |
 | 3 | Headless import/export (`import.rs`, `export.rs`) | ✅ done | Folder + FBD import (extract title/authors/genre/lang/series/annotation, dedupe by source-file identity), metadata export to FB2. INPX import, device export, and background threads/progress deferred to the GUI phases. `cargo test` green incl. import/export round-trip. |
-| 4 | GUI shell + tree navigation (egui) | ✅ done | egui main window: category tabs (Authors/Genres/Series/Folders) + node tree with counts, book list, detail panel, search box, soft-delete. State is pure Rust (headless-tested); view is pure egui; eframe runner behind the `gui` feature. Add/edit dialogs deferred to Phase 5. |
+| 4 | GUI shell + tree navigation (egui) | ✅ done | egui main window: category tabs (Authors/Genres/Series/Folders) + node tree with counts, book list, detail panel, search box, soft-delete. State is pure Rust (headless-tested); view is pure egui; eframe runner behind the `gui` feature. Import wired to a native folder picker (D13); add/edit book dialogs still deferred. |
 | 5 | Search UI, settings, stats | ✅ done | Multi-field search (title/author/lang/ext/local-only), statistics dialog (totals + by-lang/by-ext breakdowns via in-use counts), settings persisted to `<db>.ini` (readers, active tab, window size) matching the original's `TMHLSettings`. Named search presets deferred. `cargo test` green incl. search/stats/settings round-trip. |
 | 6 | Librusec client + download queue (`librusec/`) | ✅ done | Connection-script engine (GET/POST/ADD/CHECK/REDIR/PAUSE) + macro substitution, INPX catalog parser, background search + download queue with progress/cancel. GUI Online tab wired. Engine is pure Rust, unit-tested vs a mock transport; live HTTP via reqwest (rustls). `cargo test` green (7 librusec + online GUI). |
 | 7 | Polish + performance | ✅ done | Book list **virtualized** (`show_rows` + `LIMIT/OFFSET` window fetch, selection by stable id) and left-panel trees **cached per tab**, so cold start is a single `COUNT(*)` — flat at any library size. Benchmark at 1M books: open+state 27 ms, first frame ~230 ms (egui init). Windows build via CI (`rustls`, no OpenSSL). |
@@ -141,6 +141,16 @@ from cache. The eager full load we no longer do would take ~2.6 s and hold all 1
 *(Known: the per-node tree first-build is a full scan — the original schema has no index on `Folder`/`SeriesID`.
 Adding covering indexes would speed it but diverges from the shipped schema; deferred.)*
 
+### D13 — GUI Import = native folder picker (`rfd`) + synchronous import through `State`
+The top-bar **Import…** button opens a native folder dialog (`rfd` — the Windows common dialog on the target,
+no extra DLLs to bundle) and imports every `.fb2`/`.fbd` under it with the *same* headless `Importer` the CLI
+uses. The picker is gated behind the `gui` feature (`#[cfg(feature = "gui")]`) so headless builds/tests never
+open a real dialog; the actual work lives in `State::import_dir`, which runs **synchronously** (the rusqlite
+connection isn't `Send`) and then rebuilds the per-tab trees + reloads the list total, since new books may add
+authors/genres/series/folders. Large folders briefly block the UI while they import; a background/progress path
+would need either a second connection or chunked frames (the shared connection can't move to a worker thread) —
+deferred as a follow-up.
+
 ---
 
 ## Faithful behavior recovered from the original source
@@ -210,3 +220,9 @@ These were read from the FreePascal source, not guessed — implementers should 
   first render frame ~230 ms (egui init), Folders tree re-visit 5 µs from cache vs ~2 s first build; the eager
   full load we no longer do would take ~2.6 s + hold all rows in memory. `cargo build --features gui` clean,
   no warnings. 33 tests green total.
+- **GUI Import (post-Phase 7)** — Wired the top-bar **Import…** button to a native folder picker (`rfd`,
+  gated behind the `gui` feature) that imports every `.fb2`/`.fbd` under the chosen folder via the shared
+  headless `Importer`; new `State::import_dir` runs it synchronously then rebuilds the per-tab trees + reloads
+  the list total (D13). New headless test `import_dir_refreshes_state` covers import → view refresh → dedupe on
+  re-import → rebuilt author tree. `cargo test` green (34 total: gui suite now 7), `cargo build --features gui`
+  clean, no warnings on either feature set.

@@ -19,6 +19,7 @@ eframe = { version = "0.31", optional = true }
 quick-xml = "0.42.0"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking"] }
 rusqlite = { version = "0.31", features = ["functions", "collation"] }
+rfd = { version = "0.15", optional = true }
 thiserror = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -37,7 +38,7 @@ bundled = ["rusqlite/bundled"]
 # Windowed eframe GUI (pulls winit/GL). The pure-egui view + state logic and its headless tests build
 # without this; only the native window runner needs it. Off by default so `cargo build`/`cargo test`
 # work on headless machines and the CLI stays dependency-light.
-gui = ["dep:eframe"]
+gui = ["dep:eframe", "dep:rfd"]
 
 [profile.release]
 # Single self-contained Windows .exe is the end goal; keep it lean.

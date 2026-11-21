@@ -1,11 +1,12 @@
 //! GUI application state. Pure Rust (no egui dependency) so the navigation/search/stats logic is fully
 //! testable headlessly; [`crate::gui::view`] renders from this and mutates it on user interaction.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::core::{Author, Book};
 use crate::db::{BookQuery, BookScope, Db};
+use crate::import::{Importer, ImportReport};
 use crate::librusec::catalog::{Catalog, CatalogBook};
 use crate::librusec::queue::DownloadQueue;
 use crate::settings::Settings;
@@ -341,6 +342,24 @@ impl State {
                 Err(e) => self.status = format!("delete failed: {e}"),
             }
         }
+    }
+
+    /// Import every FB2/FBD file under `dir` into the collection. The native folder picker lives in the
+    /// view; this does the actual work so it's testable headlessly. New books may add authors/genres/
+    /// series/folders, so the per-tab trees are rebuilt and the list total reloaded. Runs synchronously
+    /// (the SQLite connection isn't `Send`); large folders briefly block the UI while they import.
+    pub fn import_dir(&mut self, dir: &Path) -> crate::error::Result<ImportReport> {
+        let report = Importer::new(&mut self.db, dir).import_dir(dir)?;
+        self.reload();
+        self.tree_built = [false; 4]; // new books may add nodes / change per-node counts
+        self.status = format!(
+            "Imported {} book(s) from {} — {} already present, {} error(s)",
+            report.imported,
+            dir.display(),
+            report.existing,
+            report.errors.len()
+        );
+        Ok(report)
     }
 
     /// Total (non-deleted) book count, for the top bar.

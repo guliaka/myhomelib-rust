@@ -66,7 +66,9 @@ The windowed app is egui/eframe. The navigation **state** is pure Rust and the *
 both are tested headlessly (`cargo test`). Only the native window runner needs winit/GL, behind the
 `gui` feature. Phase 5 adds a multi-field search (title / author / lang / ext / local-only), a
 statistics dialog (totals + by-language / by-extension breakdowns), and settings persisted to an INI at
-`<db>.ini` (reader associations, active tab, window size — matching the original's `TMHLSettings`).
+`<db>.ini` (reader associations, active tab, window size — matching the original's `TMHLSettings`). The
+top-bar **Import…** button opens a native folder picker (`rfd`) and imports every `.fb2`/`.fbd` under it with
+the same headless engine as the CLI, then rebuilds the tree and list.
 
 Phase 6 adds the **Online** tab: a Librusec connection editor (user / password / URL / connection
 script, persisted under `[Librusec]` in `<db>.ini`), a background catalog search over an INPX feed, and

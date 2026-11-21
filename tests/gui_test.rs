@@ -289,3 +289,56 @@ fn online_search_queue_and_config() {
     drop(state);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+const BULGAKOV_FB2: &str = r##"<FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2">
+  <description>
+    <title-info>
+      <id>gui-import-1</id>
+      <genre>prose_classic</genre>
+      <author><last-name>Булгаков</last-name><first-name>Михаил</first-name></author>
+      <book-title>Мастер и Маргарита</book-title>
+      <lang>ru</lang>
+    </title-info>
+  </description>
+  <body><section><p>Текст.</p></section></body>
+</FictionBook>"##;
+
+#[test]
+fn import_dir_refreshes_state() {
+    let Fixture { db, dir, db_path, .. } = make_fixture();
+    let mut state = State::new(db, db_path.clone());
+    assert_eq!(state.total_books(), 3);
+
+    // A folder with one new book (distinct author/title) to import.
+    let import_dir = dir.join("inbound");
+    std::fs::create_dir_all(&import_dir).unwrap();
+    std::fs::write(import_dir.join("master.fb2"), BULGAKOV_FB2).unwrap();
+
+    // Import it through State (the headless equivalent of the Import button's work).
+    let report = state.import_dir(&import_dir).unwrap();
+    assert_eq!(report.imported, 1);
+    assert_eq!(report.existing, 0);
+    assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+
+    // The view refreshed: total went up and the new book is listed.
+    assert_eq!(state.total_books(), 4);
+    let all = titles(&mut state);
+    assert!(all.contains(&"Мастер и Маргарита".to_string()), "new book listed: {all:?}");
+
+    // The status bar reports the import.
+    assert!(state.status.contains("Imported 1 book(s)"), "status: {}", state.status);
+
+    // Re-importing the same folder dedupes — nothing new, total unchanged.
+    let report2 = state.import_dir(&import_dir).unwrap();
+    assert_eq!(report2.imported, 0);
+    assert_eq!(report2.existing, 1);
+    assert_eq!(state.total_books(), 4);
+
+    // The new author shows up in the rebuilt Authors tree (Толстой, Достоевский, Булгаков).
+    state.set_tab(0);
+    let authors = state.tree_nodes();
+    assert_eq!(authors.len(), 3, "author tree: {authors:?}");
+
+    drop(state);
+    let _ = std::fs::remove_dir_all(&dir);
+}

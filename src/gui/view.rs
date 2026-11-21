@@ -10,6 +10,34 @@ use crate::librusec::queue::ItemStatus;
 
 use super::state::{author_display, State, TABS};
 
+/// Import action for the top-bar button. In the windowed build it opens a native folder picker and
+/// imports everything under it; in headless (non-gui) builds it only reports — there's no display to
+/// show a dialog from, and tests must never block on one.
+#[cfg(feature = "gui")]
+fn do_import(state: &mut State) {
+    match pick_import_folder() {
+        Some(dir) => match state.import_dir(&dir) {
+            Ok(_) => {} // status is set by import_dir
+            Err(e) => state.status = format!("Import failed: {e}"),
+        },
+        None => {} // user cancelled the picker
+    }
+}
+
+#[cfg(not(feature = "gui"))]
+fn do_import(state: &mut State) {
+    state.status = "Import: pick a folder (the native picker is enabled in the windowed build)".into();
+}
+
+/// Native folder picker — the Windows common dialog on the target (no extra DLLs to bundle). Compiled
+/// only with the `gui` feature.
+#[cfg(feature = "gui")]
+fn pick_import_folder() -> Option<std::path::PathBuf> {
+    rfd::FileDialog::new()
+        .set_title("Choose a folder of FB2/FBD e-books to import")
+        .pick_folder()
+}
+
 /// Render one frame of the main window from `state`.
 pub fn render(ctx: &egui::Context, state: &mut State) {
     // Top bar: title + count + actions.
@@ -20,7 +48,7 @@ pub fn render(ctx: &egui::Context, state: &mut State) {
             ui.label(format!("{} books", state.total_books()));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.button("Import…").clicked() {
-                    state.status = "Import: run `myhomelib import <db> <dir>` (GUI file picker lands in Phase 5)".into();
+                    do_import(state);
                 }
                 if ui.button("Statistics").clicked() {
                     state.show_stats = true;
