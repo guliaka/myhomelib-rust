@@ -2,8 +2,8 @@
 //! can be driven headlessly in tests via `egui::Context::default()`.
 
 use egui::{
-    Align, CentralPanel, Color32, Layout, ProgressBar, RichText, ScrollArea, SidePanel, TextEdit,
-    TopBottomPanel, Window,
+    Align, CentralPanel, Color32, CornerRadius, Layout, ProgressBar, RichText, ScrollArea, SidePanel,
+    Stroke, TextEdit, TopBottomPanel, Visuals, Window,
 };
 
 use crate::librusec::queue::ItemStatus;
@@ -38,8 +38,38 @@ fn pick_import_folder() -> Option<std::path::PathBuf> {
         .pick_folder()
 }
 
+/// Classic light-gray "desktop" styling to approximate the original's native Win32 look. egui draws its
+/// own flat widgets (it can't render beveled common controls), but a light-gray chrome + white content
+/// areas + boxy (near-zero) rounding + a classic selection blue reads as a conventional desktop app
+/// rather than a neon modern one. Applied every frame so it survives any per-frame visual resets.
+fn apply_classic_theme(ctx: &egui::Context) {
+    let mut v = Visuals::light();
+    // Chrome / panels ≈ clBtnFace (#F0F0F0); text fields and content areas white.
+    v.panel_fill = Color32::from_rgb(240, 240, 240);
+    v.window_fill = Color32::from_rgb(240, 240, 240);
+    v.extreme_bg_color = Color32::WHITE;
+    v.faint_bg_color = Color32::from_rgb(240, 240, 240);
+    v.override_text_color = Some(Color32::BLACK);
+    // Boxy controls: near-zero corner radius (the original has no rounded corners).
+    let r = CornerRadius::same(1);
+    v.widgets.noninteractive.corner_radius = r;
+    v.widgets.inactive.corner_radius = r;
+    v.widgets.hovered.corner_radius = r;
+    v.widgets.active.corner_radius = r;
+    // Button faces: light gray, a touch darker on hover/press.
+    v.widgets.inactive.bg_fill = Color32::from_rgb(225, 225, 225);
+    v.widgets.hovered.bg_fill = Color32::from_rgb(236, 236, 236);
+    v.widgets.active.bg_fill = Color32::from_rgb(204, 204, 204);
+    // Classic selection blue (the original's FocusedSelectionColor ≈ #0976EA).
+    let sel = Color32::from_rgb(9, 118, 234);
+    v.selection.bg_fill = sel;
+    v.selection.stroke = Stroke::new(1.0_f32, sel);
+    ctx.set_visuals(v);
+}
+
 /// Render one frame of the main window from `state`.
 pub fn render(ctx: &egui::Context, state: &mut State) {
+    apply_classic_theme(ctx);
     // Top bar: title + count + actions.
     TopBottomPanel::top("topbar").show(ctx, |ui| {
         ui.horizontal(|ui| {
