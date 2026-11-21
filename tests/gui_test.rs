@@ -71,8 +71,9 @@ fn make_fixture() -> Fixture {
     Fixture { db, dir, db_path, tolstoy, dostoevsky, wiwar }
 }
 
-fn titles(state: &State) -> Vec<String> {
-    let mut v: Vec<String> = state.books.iter().map(|b| b.title.clone()).collect();
+fn titles(state: &mut State) -> Vec<String> {
+    let n = state.list_total as i64;
+    let mut v: Vec<String> = state.books_range(0, n).iter().map(|b| b.title.clone()).collect();
     v.sort();
     v
 }
@@ -84,7 +85,7 @@ fn navigation_by_author_genre_series_folder() {
 
     // All books.
     assert_eq!(state.selection, Selection::All);
-    assert_eq!(titles(&state), vec!["Анна Каренина", "Война и мир", "Преступление и наказание"]);
+    assert_eq!(titles(&mut state), vec!["Анна Каренина", "Война и мир", "Преступление и наказание"]);
     assert_eq!(state.total_books(), 3);
 
     // Authors tab: two nodes with correct counts.
@@ -96,7 +97,7 @@ fn navigation_by_author_genre_series_folder() {
 
     // Select the Толстой author → his two books only.
     state.select(Selection::Author(tolstoy));
-    assert_eq!(titles(&state), vec!["Анна Каренина", "Война и мир"]);
+    assert_eq!(titles(&mut state), vec!["Анна Каренина", "Война и мир"]);
 
     // Genres tab: one genre in use, all three books share it.
     state.set_tab(1);
@@ -105,7 +106,7 @@ fn navigation_by_author_genre_series_folder() {
     assert!(matches!(&genres[0].selection, Selection::Genre(c) if c == "prose_classic"));
     assert_eq!(genres[0].count, 3);
     state.select(Selection::Genre("prose_classic".into()));
-    assert_eq!(state.books.len(), 3);
+    assert_eq!(state.list_total, 3);
 
     // Series tab: one series with a single book.
     state.set_tab(2);
@@ -113,18 +114,18 @@ fn navigation_by_author_genre_series_folder() {
     assert_eq!(series.len(), 1);
     assert_eq!(series[0].count, 1);
     state.select(Selection::Series(wiwar));
-    assert_eq!(titles(&state), vec!["Война и мир"]);
+    assert_eq!(titles(&mut state), vec!["Война и мир"]);
 
     // Folders tab: root (1) + "russian" (2).
     state.set_tab(3);
     let folders = state.tree_nodes();
     assert_eq!(folders.len(), 2);
     state.select(Selection::Folder(Some("russian".into())));
-    assert_eq!(titles(&state), vec!["Анна Каренина", "Преступление и наказание"]);
+    assert_eq!(titles(&mut state), vec!["Анна Каренина", "Преступление и наказание"]);
 
     // The other author's node resolves correctly too.
     state.select(Selection::Author(dostoevsky));
-    assert_eq!(titles(&state), vec!["Преступление и наказание"]);
+    assert_eq!(titles(&mut state), vec!["Преступление и наказание"]);
 
     drop(state);
     let _ = std::fs::remove_dir_all(&dir);
@@ -138,30 +139,30 @@ fn search_filters_by_field() {
     // Author filter narrows to Толстой's two books.
     state.filters.author = "Толстой".into();
     state.reload();
-    assert_eq!(titles(&state), vec!["Анна Каренина", "Война и мир"]);
+    assert_eq!(titles(&mut state), vec!["Анна Каренина", "Война и мир"]);
 
     // Combined author + title → the single matching book.
     state.filters.title = "Анна".into();
     state.reload();
-    assert_eq!(titles(&state), vec!["Анна Каренина"]);
+    assert_eq!(titles(&mut state), vec!["Анна Каренина"]);
 
     // Language filter (exact) — all three are ru.
     state.clear_search();
     state.filters.lang = "ru".into();
     state.reload();
-    assert_eq!(state.books.len(), 3);
+    assert_eq!(state.list_total, 3);
 
     // Extension filter (exact) — all fb2.
     state.clear_search();
     state.filters.ext = "fb2".into();
     state.reload();
-    assert_eq!(state.books.len(), 3);
+    assert_eq!(state.list_total, 3);
 
     // Local-only — all local.
     state.clear_search();
     state.filters.only_local = true;
     state.reload();
-    assert_eq!(state.books.len(), 3);
+    assert_eq!(state.list_total, 3);
 
     drop(state);
     let _ = std::fs::remove_dir_all(&dir);
@@ -212,8 +213,10 @@ fn render_smoke_headless() {
     let ctx = egui::Context::default();
     // Frame 1: default. Frame 2: a book selected (detail panel). Frame 3: stats dialog open.
     for frame in 0..3 {
-        if frame == 0 && !state.books.is_empty() {
-            state.select_book(0);
+        if frame == 0 && state.list_total > 0 {
+            if let Some(b) = state.books_range(0, 1).into_iter().next() {
+                state.select_book_id(b.book_id);
+            }
         }
         if frame == 2 {
             state.show_stats = true;

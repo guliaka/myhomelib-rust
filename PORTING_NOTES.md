@@ -19,7 +19,7 @@ with a reason — nothing is dropped silently.
 | 4 | GUI shell + tree navigation (egui) | ✅ done | egui main window: category tabs (Authors/Genres/Series/Folders) + node tree with counts, book list, detail panel, search box, soft-delete. State is pure Rust (headless-tested); view is pure egui; eframe runner behind the `gui` feature. Add/edit dialogs deferred to Phase 5. |
 | 5 | Search UI, settings, stats | ✅ done | Multi-field search (title/author/lang/ext/local-only), statistics dialog (totals + by-lang/by-ext breakdowns via in-use counts), settings persisted to `<db>.ini` (readers, active tab, window size) matching the original's `TMHLSettings`. Named search presets deferred. `cargo test` green incl. search/stats/settings round-trip. |
 | 6 | Librusec client + download queue (`librusec/`) | ✅ done | Connection-script engine (GET/POST/ADD/CHECK/REDIR/PAUSE) + macro substitution, INPX catalog parser, background search + download queue with progress/cancel. GUI Online tab wired. Engine is pure Rust, unit-tested vs a mock transport; live HTTP via reqwest (rustls). `cargo test` green (7 librusec + online GUI). |
-| 7 | Polish + performance | ⬜ todo | Startup profiling (<10 s), lazy loading, Windows cross-build verified. |
+| 7 | Polish + performance | ✅ done | Book list **virtualized** (`show_rows` + `LIMIT/OFFSET` window fetch, selection by stable id) and left-panel trees **cached per tab**, so cold start is a single `COUNT(*)` — flat at any library size. Benchmark at 1M books: open+state 27 ms, first frame ~230 ms (egui init). Windows build via CI (`rustls`, no OpenSSL). |
 
 ---
 
@@ -121,6 +121,26 @@ We keep the engine **network-free** (`command` / `catalog` / `queue` / `client`)
 (no OpenSSL DLLs on the Windows `.exe`, and the blocking API lets the GUI drive downloads from a worker thread).
 Resume / partial-download is deferred to Phase 7 polish.
 
+### D12 — Virtualized book list + per-tab tree cache (targeting 1M+ book libraries)
+The GUI must stay responsive on collections of a million+ books. Two changes make startup and interaction
+cost independent of library size:
+- **The book list is virtualized.** The view uses egui's `ScrollArea::show_rows`, which hands back only the
+  *visible* row range; `State::books_range(start, count)` fetches exactly that slice with `LIMIT/OFFSET`
+  (cached while unchanged). Startup therefore does one `COUNT(*)` (`list_total`) + a ~30-row window fetch —
+  never a full load. Selection is by stable `BookID` (not a row index), so it survives scrolling/pagination,
+  and the detail panel fetches its book by id. A unified `Db::list_scope_books`/`count_scope_books` pages
+  every tree node (author/genre/series/folder) with the original's per-node ordering (series by sequence).
+- **The left-panel trees are cached per tab.** Each tab is a full-scan `GROUP BY` over the whole collection,
+  so it runs once per tab visit (and after any data mutation), not on every render frame — which would have
+  frozen the UI at scale. Re-visiting a tab returns its cache instantly.
+
+Measured (`examples/startup_bench`, 1M books): open+`State::new` **27 ms**, first render frame ~230 ms
+(one-time egui context/font init), Folders tree first build ~2 s (unindexed `GROUP BY`) but re-visit **5 µs**
+from cache. The eager full load we no longer do would take ~2.6 s and hold all 1M rows in memory.
+
+*(Known: the per-node tree first-build is a full scan — the original schema has no index on `Folder`/`SeriesID`.
+Adding covering indexes would speed it but diverges from the shipped schema; deferred.)*
+
 ---
 
 ## Faithful behavior recovered from the original source
@@ -182,3 +202,11 @@ These were read from the FreePascal source, not guessed — implementers should 
   `<db>.ini` with a multi-line script, and a headless render of the Online panel with an in-flight download).
   `cargo build --features gui` compiles clean. 32 tests green total (2 lib + 5 dao + 6 fb2 + 6 gui + 5 genres
   + 1 import/export + 7 librusec), no warnings.
+- **Phase 7** — Virtualized the book list (`show_rows` + `LIMIT/OFFSET` window fetch, by-id selection) and
+  cached the left-panel trees per tab so startup/interaction cost is independent of library size. New DAO:
+  unified paginated `list_scope_books`/`count_scope_books` (all tree nodes, series ordered by sequence) + a
+  bulk-insert fast path. `cargo test` green (added a scope-pagination/ordering dao test; GUI tests updated to
+  the lazy accessor). **Startup benchmark** (`examples/startup_bench`, 1M books): open+`State::new` 27 ms,
+  first render frame ~230 ms (egui init), Folders tree re-visit 5 µs from cache vs ~2 s first build; the eager
+  full load we no longer do would take ~2.6 s + hold all rows in memory. `cargo build --features gui` clean,
+  no warnings. 33 tests green total.

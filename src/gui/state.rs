@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crate::core::{Author, Book};
-use crate::db::{BookQuery, Db};
+use crate::db::{BookQuery, BookScope, Db};
 use crate::librusec::catalog::{Catalog, CatalogBook};
 use crate::librusec::queue::DownloadQueue;
 use crate::settings::Settings;
@@ -31,6 +31,26 @@ impl Selection {
             Selection::Series(id) => format!("Series #{id}"),
             Selection::Folder(None) => "(root folder)".to_string(),
             Selection::Folder(Some(f)) => f.clone(),
+        }
+    }
+}
+
+/// What the book list currently pages through: a search (flat [`BookQuery`]) or a tree-node scope.
+#[derive(Debug, Clone, PartialEq)]
+enum ListSource {
+    Search(BookQuery),
+    Scope(BookScope),
+}
+
+/// Map a GUI [`Selection`] to its DAO [`BookScope`].
+impl From<Selection> for BookScope {
+    fn from(s: Selection) -> Self {
+        match s {
+            Selection::All => BookScope::All,
+            Selection::Author(id) => BookScope::Author(id),
+            Selection::Genre(code) => BookScope::Genre(code),
+            Selection::Series(id) => BookScope::Series(id),
+            Selection::Folder(f) => BookScope::Folder(f),
         }
     }
 }
@@ -83,12 +103,26 @@ pub struct State {
     /// Path to the collection DB; settings are stored at `<db_path>.ini`.
     pub db_path: PathBuf,
     pub selection: Selection,
-    /// Books currently loaded for `selection` (or the search filters if active).
-    pub books: Vec<Book>,
-    /// Row in `books` shown in the detail panel (`None` = none selected).
-    pub selected_book: Option<usize>,
+    /// What the book list currently pages through: the active search (non-empty filters) or the selected
+    /// tree node. Drives `list_total` and the lazy window fetches.
+    list_source: ListSource,
+    /// Total rows in the current view (search matches or node books). Drives virtualization — the list
+    /// never loads more than the visible slice, so this stays correct at any library size.
+    pub list_total: i64,
+    /// The book shown in the detail panel, by stable id (independent of scroll position / pagination).
+    pub selected_book_id: Option<i64>,
     /// Active search filters; when non-empty they override the tree selection.
     pub filters: SearchFilters,
+    // Virtualized book-list window cache — only the visible slice is ever materialized in memory.
+    win_key: Option<ListSource>,
+    win_start: i64,
+    win_count: i64,
+    win_books: Vec<Book>,
+    // Per-tab cached left-panel trees. Each is a full-scan GROUP BY over the whole collection, so it's
+    // built once per tab (and again after any data mutation) — never per-frame, which would freeze the UI
+    // at large scale. Re-visiting a tab is instant after its first build.
+    tree_cache: [Vec<TreeNode>; 4],
+    tree_built: [bool; 4],
     /// Active left-panel tab index (into [`TABS`]).
     pub tab: usize,
     /// Status-bar message.
@@ -132,9 +166,16 @@ impl State {
             db,
             db_path,
             selection: Selection::All,
-            books: Vec::new(),
-            selected_book: None,
+            list_source: ListSource::Scope(BookScope::All),
+            list_total: 0,
+            selected_book_id: None,
             filters: SearchFilters::default(),
+            win_key: None,
+            win_start: 0,
+            win_count: 0,
+            win_books: Vec::new(),
+            tree_cache: std::array::from_fn(|_| Vec::new()),
+            tree_built: [false; 4],
             tab: active_tab,
             status: "Ready".to_string(),
             settings,
@@ -157,34 +198,58 @@ impl State {
         s
     }
 
-    /// Re-load the book list for the active search filters (if any) or the current tree selection.
+    /// Recompute what the book list shows (search if filters are set, else the selected node) and its
+    /// total row count. Does NOT load all rows — the view pages through them lazily via
+    /// [`Self::books_range`], so startup cost is a single `COUNT(*)` regardless of library size.
     pub fn reload(&mut self) {
-        let res = if !self.filters.is_empty() {
-            let q = BookQuery {
+        let source = if !self.filters.is_empty() {
+            ListSource::Search(BookQuery {
                 title_like: nonempty(&self.filters.title),
                 author_name_like: nonempty(&self.filters.author),
                 lang: nonempty(&self.filters.lang),
                 ext: nonempty(&self.filters.ext),
                 only_local: self.filters.only_local,
                 include_deleted: false,
-            };
-            self.db.search_books(&q, -1, 0)
+            })
         } else {
-            match &self.selection {
-                Selection::All => self.db.search_books(&BookQuery::default(), -1, 0),
-                Selection::Author(id) => self.db.books_by_author(*id),
-                Selection::Genre(code) => self.db.books_by_genre(code),
-                Selection::Series(id) => self.db.books_by_series(*id),
-                Selection::Folder(f) => self.db.books_by_folder(f.as_deref()),
-            }
+            ListSource::Scope(self.selection.clone().into())
         };
-        match res {
-            Ok(b) => {
-                self.books = b;
-                self.selected_book = None;
-            }
-            Err(e) => self.status = format!("error: {e}"),
+        let total = match &source {
+            ListSource::Search(q) => self.db.count_books(q),
+            ListSource::Scope(s) => self.db.count_scope_books(s),
+        };
+        self.list_source = source;
+        self.list_total = total.unwrap_or(0);
+        // Invalidate the cached window so the next render refetches for the new view.
+        self.win_key = None;
+        self.win_books.clear();
+    }
+
+    /// Fetch rows [`start..start+count`] of the current view (cached while the view + window are
+    /// unchanged). This is the only place book rows are materialized — the virtualized list calls it for
+    /// the visible slice only, so memory stays O(visible rows) at any library size.
+    pub fn books_range(&mut self, start: i64, count: i64) -> Vec<Book> {
+        if count <= 0 || self.list_total <= 0 {
+            return Vec::new();
         }
+        let s = start.max(0).min(self.list_total);
+        let c = (count as i64).min(self.list_total - s).max(0);
+        if c <= 0 {
+            return Vec::new();
+        }
+        // Cache hit: same view + same window.
+        if self.win_key == Some(self.list_source.clone()) && self.win_start == s && self.win_count == c {
+            return self.win_books.clone();
+        }
+        let books = match &self.list_source {
+            ListSource::Search(q) => self.db.search_books(q, c, s).unwrap_or_default(),
+            ListSource::Scope(sc) => self.db.list_scope_books(sc, c, s).unwrap_or_default(),
+        };
+        self.win_key = Some(self.list_source.clone());
+        self.win_start = s;
+        self.win_count = c;
+        self.win_books = books.clone();
+        books
     }
 
     /// Select a tree node and load its books (clears any active search).
@@ -209,10 +274,16 @@ impl State {
         }
     }
 
-    /// Build the rows for the active left-panel tab.
-    pub fn tree_nodes(&self) -> Vec<TreeNode> {
+    /// Rows for the active left-panel tab. Cached per tab — the underlying query is a full-scan GROUP BY
+    /// over the whole collection, so each tab builds once (and again after any data mutation), never
+    /// per-frame. Re-visiting a tab returns its cache instantly.
+    pub fn tree_nodes(&mut self) -> Vec<TreeNode> {
+        let t = self.tab.min(TABS.len() - 1);
+        if self.tree_built[t] {
+            return self.tree_cache[t].clone();
+        }
         let mut out = Vec::new();
-        match self.tab {
+        match t {
             0 => {
                 if let Ok(v) = self.db.list_author_nodes() {
                     for (id, name, count) in v {
@@ -247,26 +318,25 @@ impl State {
                 }
             }
         }
+        self.tree_built[t] = true;
+        self.tree_cache[t] = out.clone();
         out
     }
 
-    /// Select a book row for the detail panel.
-    pub fn select_book(&mut self, index: usize) {
-        if index < self.books.len() {
-            self.selected_book = Some(index);
-        }
+    /// Select a book (by stable id) for the detail panel.
+    pub fn select_book_id(&mut self, id: i64) {
+        self.selected_book_id = Some(id);
     }
 
-    /// Soft-delete the currently selected book and refresh.
+    /// Soft-delete the currently selected book (by id) and refresh the view's total.
     pub fn delete_selected_book(&mut self) {
-        if let Some(i) = self.selected_book {
-            let id = self.books[i].book_id;
-            let title = self.books[i].title.clone();
+        if let Some(id) = self.selected_book_id {
             match self.db.soft_delete_book(id) {
                 Ok(()) => {
-                    self.status = format!("Deleted “{title}”");
-                    self.selected_book = None;
+                    self.status = format!("Deleted book #{id}");
+                    self.selected_book_id = None;
                     self.reload();
+                    self.tree_built = [false; 4]; // per-node book counts may have changed
                 }
                 Err(e) => self.status = format!("delete failed: {e}"),
             }

@@ -3,9 +3,10 @@
 Rust rewrite of [MyHomeLib](https://github.com/guliaka/MyHomeLib.git) — a home e-book library
 manager (FreePascal/Lazarus original). Caters to FB2/FBD collections and Librusec-based libraries.
 
-**Status: Phases 1–6 of 7** — data layer, FB2/FBD engine, headless import/export, the egui GUI,
-search/settings/statistics, and the Librusec online client (catalog search + download queue).
-See [`PORTING_NOTES.md`](./PORTING_NOTES.md) for the phase plan, decisions, and deferred items.
+**Status: complete — all 7 phases.** Data layer, FB2/FBD engine, headless import/export, the egui GUI,
+search/settings/statistics, the Librusec online client (catalog search + download queue), and performance
+work for 1M+ book libraries (virtualized book list + cached trees). See [`PORTING_NOTES.md`](./PORTING_NOTES.md)
+for the phase plan, decisions, and deferred items.
 
 ## Layout
 ```
@@ -40,6 +41,15 @@ cargo test
 > Linking any Rust binary needs a C compiler (`cc`) + glibc dev libs — e.g. `sudo dnf install -y gcc`
 > on Fedora/Rocky. To link the system SQLite instead of bundling it, drop the default feature:
 > `cargo test --no-default-features`.
+
+## Performance (1M+ book libraries)
+The book list is **virtualized** (`show_rows` + a `LIMIT/OFFSET` fetch of only the visible slice) and the
+left-panel trees are **cached per tab**, so cold start is a single `COUNT(*)` — independent of library size.
+Measure it at scale:
+
+```sh
+cargo run --release --example startup_bench 1000000   # seed 1M books, time open + first frame
+```
 
 ## CLI
 ```sh

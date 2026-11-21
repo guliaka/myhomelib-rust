@@ -50,7 +50,7 @@ fn row_to_book(r: &rusqlite::Row) -> rusqlite::Result<Book> {
 
 /// Filters for [`Db::search_books`]. All `*_like` fields are matched case-insensitively against the
 /// uppercased `Search*` columns (the value is wrapped in `%…%`).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct BookQuery {
     pub title_like: Option<String>,
     pub author_name_like: Option<String>,
@@ -60,6 +60,18 @@ pub struct BookQuery {
     pub only_local: bool,
     /// When false (default), soft-deleted books are excluded.
     pub include_deleted: bool,
+}
+
+/// A tree-node scope for listing books (mirrors [`crate::gui::state::Selection`]). `All` = the whole
+/// collection. This is what the virtualized book list pages through with `LIMIT/OFFSET`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BookScope {
+    All,
+    Author(i64),
+    Genre(String),
+    Series(i64),
+    /// A folder; `None` = the collection root.
+    Folder(Option<String>),
 }
 
 impl Db {
@@ -273,6 +285,36 @@ impl Db {
 
         tx.commit()?;
         Ok(id)
+    }
+
+    /// Insert many books in a single transaction — the fast path for large imports/seeding (one commit,
+    /// not one per row). Computes the `Search*` columns; does **not** create author/genre links. Returns
+    /// the number of rows inserted.
+    pub fn insert_books_bulk(&mut self, books: &[Book]) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        for b in books {
+            let s_title = search::upper(&b.title);
+            let s_lang = b.lang.as_deref().map(search::upper);
+            let s_folder = b.folder.as_deref().map(search::upper);
+            let s_file = search::upper(&b.file_name);
+            let s_ext = b.ext.as_deref().map(search::upper);
+            let s_kw = b.key_words.as_deref().map(search::upper);
+            let s_ann = b.annotation.as_deref().map(search::upper);
+            tx.execute(
+                "INSERT INTO Books (LibID, Title, SeriesID, SeqNumber, UpdateDate, LibRate, Lang, Folder, \
+                 FileName, InsideNo, Ext, BookSize, IsLocal, IsDeleted, KeyWords, Rate, Progress, Annotation, Review, \
+                 SearchTitle, SearchLang, SearchFolder, SearchFileName, SearchExt, SearchKeyWords, SearchAnnotation) \
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26)",
+                params![
+                    b.lib_id, b.title, b.series_id, b.seq_number, b.update_date, b.lib_rate, b.lang,
+                    b.folder, b.file_name, b.inside_no, b.ext, b.book_size, b.is_local as i32,
+                    b.is_deleted as i32, b.key_words, b.rate, b.progress, b.annotation, b.review,
+                    s_title, s_lang, s_folder, s_file, s_ext, s_kw, s_ann,
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(books.len())
     }
 
     pub fn get_book(&self, id: i64) -> Result<Option<Book>> {
@@ -491,46 +533,32 @@ impl Db {
         Ok(out)
     }
 
-    /// Books by exact author.
-    pub fn books_by_author(&self, author_id: i64) -> Result<Vec<Book>> {
+    /// Paginated books for a tree [`BookScope`] (or all when `All`). `limit < 0` = no limit. Ordered per
+    /// scope — series by sequence number, everything else by title — matching the original's node lists.
+    pub fn list_scope_books(&self, scope: &BookScope, limit: i64, offset: i64) -> Result<Vec<Book>> {
+        let (where_sql, order_by, mut params) = scope_clause(scope);
+        let n = params.len();
+        let pagination = if limit < 0 {
+            String::new()
+        } else {
+            format!(" LIMIT ?{} OFFSET ?{}", n + 1, n + 2)
+        };
+        if limit >= 0 {
+            params.push(Box::new(limit));
+            params.push(Box::new(offset));
+        }
         let sql = format!(
-            "SELECT {} FROM Books b WHERE b.IsDeleted = 0 \
-             AND EXISTS (SELECT 1 FROM Author_List al WHERE al.BookID = b.BookID AND al.AuthorID = ?1) \
-             ORDER BY b.Title COLLATE MHL_SYSTEM_NOCASE",
-            book_cols("b")
+            "SELECT {} FROM Books b WHERE {} {}{}",
+            book_cols("b"), where_sql, order_by, pagination
         );
-        self.query_books(&sql, vec![Box::new(author_id)])
+        self.query_books(&sql, params)
     }
 
-    /// Books by genre code.
-    pub fn books_by_genre(&self, code: &str) -> Result<Vec<Book>> {
-        let sql = format!(
-            "SELECT {} FROM Books b WHERE b.IsDeleted = 0 \
-             AND EXISTS (SELECT 1 FROM Genre_List gl WHERE gl.BookID = b.BookID AND gl.GenreCode = ?1) \
-             ORDER BY b.Title COLLATE MHL_SYSTEM_NOCASE",
-            book_cols("b")
-        );
-        self.query_books(&sql, vec![Box::new(code.to_string())])
-    }
-
-    /// Books in a series (ordered by sequence number).
-    pub fn books_by_series(&self, series_id: i64) -> Result<Vec<Book>> {
-        let sql = format!(
-            "SELECT {} FROM Books b WHERE b.IsDeleted = 0 AND b.SeriesID = ?1 \
-             ORDER BY b.SeqNumber, b.Title COLLATE MHL_SYSTEM_NOCASE",
-            book_cols("b")
-        );
-        self.query_books(&sql, vec![Box::new(series_id)])
-    }
-
-    /// Books in a folder (`None` = root).
-    pub fn books_by_folder(&self, folder: Option<&str>) -> Result<Vec<Book>> {
-        let sql = format!(
-            "SELECT {} FROM Books b WHERE b.IsDeleted = 0 AND IFNULL(b.Folder,'') = IFNULL(?1,'') \
-             ORDER BY b.Title COLLATE MHL_SYSTEM_NOCASE",
-            book_cols("b")
-        );
-        self.query_books(&sql, vec![Box::new(folder.map(|s| s.to_string()))])
+    /// Total (non-deleted) books in a tree [`BookScope`]. Drives the virtualized list's row count.
+    pub fn count_scope_books(&self, scope: &BookScope) -> Result<i64> {
+        let (where_sql, _, params) = scope_clause(scope);
+        let sql = format!("SELECT COUNT(*) FROM Books b WHERE {}", where_sql);
+        Ok(self.conn.query_row(&sql, params_from_iter(params), |r| r.get(0))?)
     }
 
     /// Run a `SELECT … FROM Books b …` query that maps rows via [`row_to_book`].
@@ -595,6 +623,40 @@ fn search_where(q: &BookQuery) -> Result<(String, Vec<Box<dyn ToSql>>)> {
         format!("WHERE {}", clauses.join(" AND "))
     };
     Ok((where_sql, params))
+}
+
+/// Build the `WHERE` + `ORDER BY` + params for a [`BookScope`] list. Shared by [`Db::list_scope_books`]
+/// and [`Db::count_scope_books`]. Series orders by sequence number; everything else by title — matching
+/// the original's per-node book lists.
+fn scope_clause(scope: &BookScope) -> (String, String, Vec<Box<dyn ToSql>>) {
+    let by_title = "ORDER BY b.Title COLLATE MHL_SYSTEM_NOCASE";
+    match scope {
+        BookScope::All => ("b.IsDeleted = 0".into(), by_title.into(), vec![]),
+        BookScope::Author(id) => (
+            "b.IsDeleted = 0 AND EXISTS (SELECT 1 FROM Author_List al \
+             WHERE al.BookID = b.BookID AND al.AuthorID = ?1)"
+                .into(),
+            by_title.into(),
+            vec![Box::new(*id)],
+        ),
+        BookScope::Genre(code) => (
+            "b.IsDeleted = 0 AND EXISTS (SELECT 1 FROM Genre_List gl \
+             WHERE gl.BookID = b.BookID AND gl.GenreCode = ?1)"
+                .into(),
+            by_title.into(),
+            vec![Box::new(code.clone())],
+        ),
+        BookScope::Series(id) => (
+            "b.IsDeleted = 0 AND b.SeriesID = ?1".into(),
+            "ORDER BY b.SeqNumber, b.Title COLLATE MHL_SYSTEM_NOCASE".into(),
+            vec![Box::new(*id)],
+        ),
+        BookScope::Folder(f) => (
+            "b.IsDeleted = 0 AND IFNULL(b.Folder,'') = IFNULL(?1,'')".into(),
+            by_title.into(),
+            vec![Box::new(f.clone())],
+        ),
+    }
 }
 
 /// Assemble the full paginated SELECT for [`Db::search_books`].

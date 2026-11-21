@@ -95,7 +95,8 @@ pub fn render(ctx: &egui::Context, state: &mut State) {
         ui.label(RichText::new(state.status.as_str()).weak());
     });
 
-    // Central: book list + detail panel.
+    // Central: virtualized book list + detail panel. The list materializes only the visible slice, so it
+    // stays fast and low-memory at any library size (1M+ rows).
     CentralPanel::default().show(ctx, |ui| {
         let heading = format!(
             "{} — {} books",
@@ -104,51 +105,51 @@ pub fn render(ctx: &egui::Context, state: &mut State) {
             } else {
                 "Search".to_string()
             },
-            state.books.len()
+            state.list_total
         );
         ui.label(RichText::new(heading).strong());
         ui.separator();
 
-        let rows: Vec<(String, bool)> = state
-            .books
-            .iter()
-            .enumerate()
-            .map(|(i, b)| {
-                (
-                    format!("{}  [{}] {}", b.title, b.lang.as_deref().unwrap_or("-"), size_str(b.book_size)),
-                    state.selected_book == Some(i),
-                )
-            })
-            .collect();
-
-        ScrollArea::vertical().show(ui, |ui| {
-            if rows.is_empty() {
-                ui.label(RichText::new("No books.").weak());
-            } else {
-                for (i, (label, is_sel)) in rows.into_iter().enumerate() {
+        let total = state.list_total as usize;
+        if total == 0 {
+            ui.label(RichText::new("No books.").weak());
+        } else {
+            let row_height = ui.text_style_height(&egui::TextStyle::Body);
+            ScrollArea::vertical().show_rows(ui, row_height, total, |ui, range| {
+                // Materialize only the visible slice (cached) — O(visible rows), not O(library).
+                let win = state.books_range(range.start as i64, (range.end - range.start) as i64);
+                for b in win.iter() {
+                    let is_sel = state.selected_book_id == Some(b.book_id);
+                    let label = format!(
+                        "{}  [{}] {}",
+                        b.title,
+                        b.lang.as_deref().unwrap_or("-"),
+                        size_str(b.book_size)
+                    );
                     if ui.selectable_label(is_sel, label).clicked() {
-                        state.select_book(i);
+                        state.select_book_id(b.book_id);
                     }
                 }
-            }
-        });
+            });
+        }
 
-        // Detail panel for the selected book. Data is gathered into owned locals first so no borrow on
-        // `state` is held across the (mutating) Delete button.
-        if let Some(i) = state.selected_book {
-            if i < state.books.len() {
-                let title = state.books[i].title.clone();
+        // Detail panel for the selected book (fetched by id — independent of scroll position / pagination).
+        // Data is gathered into owned locals first so no borrow on `state` is held across the Delete button.
+        if let Some(id) = state.selected_book_id {
+            if let Some(b) = state.db.get_book(id).ok().flatten() {
+                let title = b.title.clone();
                 let authors = state
                     .db
-                    .book_authors(state.books[i].book_id)
+                    .book_authors(id)
                     .map(|as_| as_.iter().map(author_display).collect::<Vec<String>>())
                     .unwrap_or_default();
-                let file = {
-                    let b = &state.books[i];
-                    format!("{}{}", b.file_name, b.ext.as_ref().map(|e| format!(".{e}")).unwrap_or_default())
-                };
-                let folder = state.books[i].folder.clone();
-                let ann = state.books[i].annotation.clone();
+                let file = format!(
+                    "{}{}",
+                    b.file_name,
+                    b.ext.as_ref().map(|e| format!(".{e}")).unwrap_or_default()
+                );
+                let folder = b.folder.clone();
+                let ann = b.annotation.clone();
 
                 ui.separator();
                 ui.label(RichText::new(title.as_str()).strong().size(16.));

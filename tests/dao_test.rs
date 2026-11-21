@@ -2,7 +2,7 @@
 //! author/series dedup, book insert + links, and paginated search.
 
 use myhomelib::core::Book;
-use myhomelib::db::{BookQuery, Db};
+use myhomelib::db::{BookQuery, BookScope, Db};
 use rusqlite::params;
 
 fn temp_db() -> (tempfile::TempDir, std::path::PathBuf) {
@@ -143,4 +143,44 @@ fn soft_deleted_excluded_by_default() {
     // But included when asked.
     let q = BookQuery { include_deleted: true, ..Default::default() };
     assert_eq!(db.count_books(&q).unwrap(), 2);
+}
+
+#[test]
+fn list_scope_books_paginates_and_orders_series_by_seq() {
+    let (_d, path) = temp_db();
+    let mut db = Db::open(&path).unwrap();
+    let a_tol = db.upsert_author("Толстой", Some("Лев"), None).unwrap();
+    let series = db.upsert_series("Цикл").unwrap();
+
+    // Three books in one series; sequence numbers deliberately differ from title order.
+    for (title, seq) in [("Charlie", 1), ("Alpha", 2), ("Beta", 3)] {
+        let mut b = make_book(title, "ru");
+        b.series_id = Some(series);
+        b.seq_number = Some(seq);
+        db.insert_book(&b, &[a_tol], &[]).unwrap();
+    }
+
+    // Scope counts.
+    assert_eq!(db.count_scope_books(&BookScope::All).unwrap(), 3);
+    assert_eq!(db.count_scope_books(&BookScope::Author(a_tol)).unwrap(), 3);
+    assert_eq!(db.count_scope_books(&BookScope::Series(series)).unwrap(), 3);
+
+    // All-scope paginates by title: Alpha, Beta, Charlie.
+    let page0 = db.list_scope_books(&BookScope::All, 2, 0).unwrap();
+    let page1 = db.list_scope_books(&BookScope::All, 2, 2).unwrap();
+    assert_eq!(page0.len(), 2);
+    assert_eq!(page1.len(), 1);
+    assert_eq!(page0[0].title, "Alpha");
+    assert_eq!(page0[1].title, "Beta");
+    assert_eq!(page1[0].title, "Charlie");
+
+    // Series scope orders by SeqNumber (Charlie=1, Alpha=2, Beta=3) — NOT title order.
+    let s = db.list_scope_books(&BookScope::Series(series), 10, 0).unwrap();
+    assert_eq!(
+        s.iter().map(|b| b.title.as_str()).collect::<Vec<_>>(),
+        vec!["Charlie", "Alpha", "Beta"]
+    );
+
+    // Folder scope (all three share folder "x").
+    assert_eq!(db.count_scope_books(&BookScope::Folder(Some("x".into()))).unwrap(), 3);
 }
