@@ -8,6 +8,10 @@ on:
 jobs:
   build-windows:
     runs-on: windows-latest
+    # Creating/updating the release + uploading assets needs Contents:write; grant it to this workflow's
+    # token (scoped to this workflow only — doesn't change the repo-wide default).
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -57,5 +61,7 @@ jobs:
           draft: false
           prerelease: false
           fail_on_unmatched_files: true
+        # Prefer a dedicated Contents:write token (RELEASE_TOKEN secret) if one is set — useful when an
+        # org policy blocks the `permissions` escalation above; otherwise the workflow's GITHUB_TOKEN.
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
