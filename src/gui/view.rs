@@ -2,9 +2,11 @@
 //! can be driven headlessly in tests via `egui::Context::default()`.
 
 use egui::{
-    Align, CentralPanel, Color32, Layout, ProgressBar, RichText, ScrollArea, SidePanel, TextEdit,
-    TopBottomPanel, Window,
+    Align, Align2, CentralPanel, Color32, CornerRadius, Layout, ProgressBar, Rect, RichText, ScrollArea,
+    Sense, SidePanel, Stroke, TextEdit, TopBottomPanel, Visuals, Window,
 };
+
+use crate::core::Book;
 
 use crate::librusec::queue::ItemStatus;
 
@@ -38,168 +40,184 @@ fn pick_import_folder() -> Option<std::path::PathBuf> {
         .pick_folder()
 }
 
+/// Classic light-gray "desktop" styling to approximate the original's native Win32 look. egui draws its
+/// own flat widgets (it can't render beveled common controls), but a light-gray chrome + white content
+/// areas + boxy (near-zero) rounding + a classic selection blue reads as a conventional desktop app
+/// rather than a neon modern one. Applied every frame so it survives any per-frame visual resets.
+fn apply_classic_theme(ctx: &egui::Context) {
+    let mut v = Visuals::light();
+    // Chrome / panels ≈ clBtnFace (#F0F0F0); text fields and content areas white.
+    v.panel_fill = Color32::from_rgb(240, 240, 240);
+    v.window_fill = Color32::from_rgb(240, 240, 240);
+    v.extreme_bg_color = Color32::WHITE;
+    v.faint_bg_color = Color32::from_rgb(240, 240, 240);
+    v.override_text_color = Some(Color32::BLACK);
+    // Boxy controls: near-zero corner radius (the original has no rounded corners).
+    let r = CornerRadius::same(1);
+    v.widgets.noninteractive.corner_radius = r;
+    v.widgets.inactive.corner_radius = r;
+    v.widgets.hovered.corner_radius = r;
+    v.widgets.active.corner_radius = r;
+    // Button faces: light gray, a touch darker on hover/press.
+    v.widgets.inactive.bg_fill = Color32::from_rgb(225, 225, 225);
+    v.widgets.hovered.bg_fill = Color32::from_rgb(236, 236, 236);
+    v.widgets.active.bg_fill = Color32::from_rgb(204, 204, 204);
+    // Classic selection blue (the original's FocusedSelectionColor ≈ #0976EA).
+    let sel = Color32::from_rgb(9, 118, 234);
+    v.selection.bg_fill = sel;
+    v.selection.stroke = Stroke::new(1.0_f32, sel);
+    ctx.set_visuals(v);
+}
+
 /// Render one frame of the main window from `state`.
 pub fn render(ctx: &egui::Context, state: &mut State) {
-    // Top bar: title + count + actions.
-    TopBottomPanel::top("topbar").show(ctx, |ui| {
+    apply_classic_theme(ctx);
+    // Menu bar — the original's TMainMenu (Книга / Коллекция / Группа / Редактирование / Вид / Инструменты / Помощь).
+    TopBottomPanel::top("menubar").show(ctx, |ui| {
+        render_menu_bar(ui, state);
+    });
+
+    // Icon toolbar — the key actions as compact buttons (the original uses icon toolbars; we use short
+    // labels since its icon assets aren't bundled) plus the collection count on the right.
+    TopBottomPanel::top("toolbar").show(ctx, |ui| {
         ui.horizontal(|ui| {
-            ui.label(RichText::new("MyHomeLib").strong().size(18.));
+            if ui.button("Импорт…").clicked() {
+                do_import(state);
+            }
             ui.separator();
-            ui.label(format!("{} books", state.total_books()));
+            if ui.button("Удалить").clicked() {
+                state.delete_selected_book();
+            }
+            ui.separator();
+            if ui.button("Поиск").clicked() {
+                state.set_tab(3);
+            }
+            ui.separator();
+            if ui.button("Онлайн").clicked() {
+                state.show_online = true;
+            }
+            ui.separator();
+            if ui.button("Статистика").clicked() {
+                state.show_stats = true;
+            }
+            if ui.button("Настройки").clicked() {
+                state.show_settings = true;
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.button("Import…").clicked() {
-                    do_import(state);
-                }
-                if ui.button("Statistics").clicked() {
-                    state.show_stats = true;
-                }
-                if ui.button("Settings").clicked() {
-                    state.show_settings = true;
-                }
-                if ui.button("Online").clicked() {
-                    state.show_online = true;
-                }
+                ui.label(RichText::new(format!("Коллекция: {} книг", state.total_books())).weak());
             });
         });
     });
 
-    // Search panel: multi-field filters (title / author / lang / ext / local-only).
-    TopBottomPanel::top("searchbar").show(ctx, |ui| {
-        let prev = state.filters.clone();
+    // Page-control tab bar — the original's TPageControl (Авторы / Серии / Жанры / Поиск / Группы / Список загрузок).
+    TopBottomPanel::top("tabbar").show(ctx, |ui| {
         ui.horizontal(|ui| {
-            ui.label("Title");
-            ui.add(TextEdit::singleline(&mut state.filters.title).desired_width(150.).hint_text("…"));
-            ui.separator();
-            ui.label("Author");
-            ui.add(TextEdit::singleline(&mut state.filters.author).desired_width(150.));
-            ui.separator();
-            ui.label("Lang");
-            ui.add(TextEdit::singleline(&mut state.filters.lang).desired_width(48.).hint_text("ru"));
-            ui.separator();
-            ui.label("Ext");
-            ui.add(TextEdit::singleline(&mut state.filters.ext).desired_width(48.).hint_text("fb2"));
-            ui.separator();
-            ui.checkbox(&mut state.filters.only_local, "local only");
-            if ui.button("Clear").clicked() {
-                state.clear_search();
+            for (i, name) in TABS.iter().enumerate() {
+                if ui.selectable_label(state.tab == i, *name).clicked() {
+                    state.set_tab(i);
+                }
             }
         });
-        if state.filters != prev {
-            state.reload();
-        }
     });
 
-    // Left panel: category tabs + tree.
-    SidePanel::left("tree")
-        .resizable(true)
-        .default_width(260.)
-        .min_width(160.)
-        .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                for (i, name) in TABS.iter().enumerate() {
-                    if ui.selectable_label(state.tab == i, *name).clicked() {
-                        state.set_tab(i);
-                    }
+    // Left nav tree — shown only on the category tabs (Авторы / Серии / Жанры / Группы).
+    if state.is_category_tab() {
+        SidePanel::left("nav")
+            .resizable(true)
+            .default_width(260.)
+            .min_width(160.)
+            .show(ctx, |ui| {
+                let nodes = state.tree_nodes();
+                if nodes.is_empty() {
+                    ui.label(RichText::new("(пусто)").weak());
+                } else {
+                    ScrollArea::vertical().show(ui, |ui| {
+                        for node in nodes.iter() {
+                            let is_sel = node.selection == state.selection;
+                            if ui.selectable_label(is_sel, format!("{}  ({})", node.label, node.count)).clicked() {
+                                state.select(node.selection.clone());
+                            }
+                        }
+                    });
                 }
             });
-            ui.separator();
-            let nodes = state.tree_nodes();
-            if nodes.is_empty() {
-                ui.label(RichText::new("(empty)").weak());
-            } else {
-                ScrollArea::vertical().show(ui, |ui| {
-                    for node in nodes.iter() {
-                        let is_sel = node.selection == state.selection;
-                        if ui.selectable_label(is_sel, format!("{}  ({})", node.label, node.count)).clicked() {
-                            state.select(node.selection.clone());
-                        }
-                    }
-                });
-            }
-        });
+    }
 
-    // Status bar.
+    // Status bar — the original's TStatusBar.
     TopBottomPanel::bottom("statusbar").show(ctx, |ui| {
         ui.label(RichText::new(state.status.as_str()).weak());
     });
 
-    // Central: virtualized book list + detail panel. The list materializes only the visible slice, so it
-    // stays fast and low-memory at any library size (1M+ rows).
-    CentralPanel::default().show(ctx, |ui| {
-        let heading = format!(
-            "{} — {} books",
-            if state.filters.is_empty() {
-                state.selection.label()
-            } else {
-                "Search".to_string()
-            },
-            state.list_total
-        );
-        ui.label(RichText::new(heading).strong());
-        ui.separator();
-
-        let total = state.list_total as usize;
-        if total == 0 {
-            ui.label(RichText::new("No books.").weak());
-        } else {
-            let row_height = ui.text_style_height(&egui::TextStyle::Body);
-            ScrollArea::vertical().show_rows(ui, row_height, total, |ui, range| {
-                // Materialize only the visible slice (cached) — O(visible rows), not O(library).
-                let win = state.books_range(range.start as i64, (range.end - range.start) as i64);
-                for b in win.iter() {
-                    let is_sel = state.selected_book_id == Some(b.book_id);
-                    let label = format!(
-                        "{}  [{}] {}",
-                        b.title,
-                        b.lang.as_deref().unwrap_or("-"),
-                        size_str(b.book_size)
+    // Bottom info band for the selected book — mirrors the original's dark TInfoPanel that sits under the
+    // book grid on every tab (hidden on the download-queue tab). Data is gathered into owned locals first
+    // so no borrow on `state` is held across the Delete button.
+    if !state.is_downloads_tab() {
+        TopBottomPanel::bottom("bookinfo")
+        .min_height(36.0)
+        .max_height(170.0)
+        .show(ctx, |ui| {
+            if let Some(id) = state.selected_book_id {
+                if let Some(b) = state.db.get_book(id).ok().flatten() {
+                    let title = b.title.clone();
+                    let authors = state
+                        .db
+                        .book_authors(id)
+                        .map(|as_| as_.iter().map(author_display).collect::<Vec<String>>())
+                        .unwrap_or_default();
+                    let file = format!(
+                        "{}{}",
+                        b.file_name,
+                        b.ext.as_ref().map(|e| format!(".{e}")).unwrap_or_default()
                     );
-                    if ui.selectable_label(is_sel, label).clicked() {
-                        state.select_book_id(b.book_id);
+                    let folder = b.folder.clone();
+                    let ann = b.annotation.clone();
+                    let genres = state.db.book_genres(id).unwrap_or_default();
+
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new(title.as_str()).strong());
+                        if !authors.is_empty() {
+                            ui.label(format!("— {}", authors.join(", ")));
+                        }
+                        if !genres.is_empty() {
+                            ui.label(format!("· {}", genres.join(", ")));
+                        }
+                        ui.label(format!("· {file}"));
+                        if let Some(f) = folder {
+                            ui.label(format!("· {f}"));
+                        }
+                    });
+                    if let Some(a) = ann {
+                        if !a.trim().is_empty() {
+                            ScrollArea::vertical().max_height(80.0).show(ui, |ui| {
+                                ui.label(a.as_str());
+                            });
+                        }
+                    }
+                    if ui.button("Delete book").clicked() {
+                        state.delete_selected_book();
                     }
                 }
-            });
-        }
-
-        // Detail panel for the selected book (fetched by id — independent of scroll position / pagination).
-        // Data is gathered into owned locals first so no borrow on `state` is held across the Delete button.
-        if let Some(id) = state.selected_book_id {
-            if let Some(b) = state.db.get_book(id).ok().flatten() {
-                let title = b.title.clone();
-                let authors = state
-                    .db
-                    .book_authors(id)
-                    .map(|as_| as_.iter().map(author_display).collect::<Vec<String>>())
-                    .unwrap_or_default();
-                let file = format!(
-                    "{}{}",
-                    b.file_name,
-                    b.ext.as_ref().map(|e| format!(".{e}")).unwrap_or_default()
-                );
-                let folder = b.folder.clone();
-                let ann = b.annotation.clone();
-
-                ui.separator();
-                ui.label(RichText::new(title.as_str()).strong().size(16.));
-                if !authors.is_empty() {
-                    ui.label(format!("Authors: {}", authors.join(", ")));
-                }
-                ui.label(format!("File: {file}"));
-                if let Some(f) = folder {
-                    ui.label(format!("Folder: {f}"));
-                }
-                if let Some(a) = ann {
-                    if !a.trim().is_empty() {
-                        ui.add_space(4.0);
-                        ui.label(RichText::new("Annotation").strong());
-                        ui.label(a.as_str());
-                    }
-                }
+            } else {
                 ui.add_space(6.0);
-                if ui.button("Delete book").clicked() {
-                    state.delete_selected_book();
-                }
+                ui.label(RichText::new("Select a book to view information").weak());
             }
+        });
+    }
+
+    // Central content — depends on the active tab. Category tabs show a heading + the virtualized
+    // multi-column book grid (the original's TBookTree); the Поиск tab shows the search form + results;
+    // the download tab shows the queue table. Only the visible slice is ever materialized, so it stays
+    // fast and low-memory at any library size (1M+ rows).
+    CentralPanel::default().show(ctx, |ui| {
+        if state.is_search_tab() {
+            render_search_view(ui, state);
+        } else if state.is_downloads_tab() {
+            render_downloads_view(ui, state);
+        } else {
+            let heading = format!("{} — {} книг", TABS[state.tab], state.list_total);
+            ui.label(RichText::new(heading).strong());
+            ui.separator();
+            render_book_grid(ui, state);
         }
     });
 
@@ -429,5 +447,267 @@ fn size_str(bytes: Option<i64>) -> String {
         format!("{:.0} KB", b as f64 / KB)
     } else {
         format!("{b} B")
+    }
+}
+
+/// A column in the book grid: header label, pixel width, and whether its cells are center-aligned.
+struct GridCol {
+    header: &'static str,
+    width: f32,
+    center: bool,
+}
+
+/// Column layout for the book grid. The narrow columns have fixed widths; "Title" absorbs the leftover
+/// panel width so the grid spans the full central area like the original's TBookTree.
+fn book_grid_columns(available: f32) -> Vec<GridCol> {
+    let fixed = 45.0 + 78.0 + 64.0 + 92.0; // #, size, rating, added-date
+    let title_w = (available - fixed).max(180.0);
+    vec![
+        GridCol { header: "Название", width: title_w, center: false },
+        GridCol { header: "№", width: 45.0, center: true },
+        GridCol { header: "Размер", width: 78.0, center: true },
+        GridCol { header: "Рейтинг", width: 64.0, center: true },
+        GridCol { header: "Добавлено", width: 92.0, center: false },
+    ]
+}
+
+/// Cell text for a book, in the same order as [`book_grid_columns`].
+fn book_cell_texts(b: &Book) -> Vec<String> {
+    vec![
+        b.title.clone(),
+        b.seq_number.map(|n| n.to_string()).unwrap_or_else(|| "—".to_string()),
+        size_str(b.book_size),
+        if b.rate > 0 { b.rate.to_string() } else { "—".to_string() },
+        // update_date is a formatted string (e.g. "2026-01-01 00:00:00"); show the date part only.
+        b.update_date.split(' ').next().unwrap_or("").to_string(),
+    ]
+}
+
+/// Render the virtualized multi-column book grid: a fixed header row, then only the visible slice of
+/// rows (via `show_rows`), each drawn as clipped fixed-width cells. Selection clicks are applied to
+/// `state`. Stays O(visible rows) at any library size (1M+).
+fn render_book_grid(ui: &mut egui::Ui, state: &mut State) {
+    let cols = book_grid_columns(ui.available_width());
+    let total_w: f32 = cols.iter().map(|c| c.width).sum();
+    let row_h = ui.text_style_height(&egui::TextStyle::Body);
+
+    // Header row (non-scrolling) with a bottom rule.
+    {
+        let (hrect, _hresp) = ui.allocate_exact_size(egui::vec2(total_w, row_h), Sense::hover());
+        let origin = hrect.min;
+        let font_id = egui::TextStyle::Body.resolve(ui.ctx().style().as_ref());
+        let mut x = 0.0_f32;
+        for c in &cols {
+            let cell = Rect::from_min_size(
+                egui::pos2(origin.x + x, origin.y),
+                egui::vec2(c.width, row_h),
+            );
+            let (anchor_pos, anchor) = if c.center {
+                (cell.center(), Align2::CENTER_CENTER)
+            } else {
+                (cell.min, Align2::LEFT_CENTER)
+            };
+            ui.painter()
+                .with_clip_rect(cell)
+                .text(anchor_pos, anchor, c.header, font_id.clone(), Color32::BLACK);
+            x += c.width;
+        }
+        let y = origin.y + row_h;
+        ui.painter().line_segment(
+            [egui::pos2(origin.x, y), egui::pos2(origin.x + total_w, y)],
+            Stroke::new(1.0_f32, Color32::from_rgb(160, 160, 160)),
+        );
+    }
+
+    let total = state.list_total as usize;
+    if total == 0 {
+        ui.add_space(4.0);
+        ui.label(RichText::new("No books.").weak());
+        return;
+    }
+    let grid_row_h = row_h + 3.0;
+    ScrollArea::vertical().show_rows(ui, grid_row_h, total, |ui, range| {
+        // Materialize only the visible slice (cached) — O(visible rows), not O(library).
+        let win = state.books_range(range.start as i64, (range.end - range.start) as i64);
+        for b in win.iter() {
+            let is_sel = state.selected_book_id == Some(b.book_id); // shared borrow; ends here
+            if render_book_row(ui, b, &cols, is_sel) {
+                state.select_book_id(b.book_id); // mutable borrow
+            }
+        }
+    });
+}
+
+/// Draw one grid row as clipped fixed-width cells with a full-row selection/hover highlight (the
+/// original uses toFullRowSelect). Returns true if the row was clicked.
+fn render_book_row(ui: &mut egui::Ui, b: &Book, cols: &[GridCol], is_selected: bool) -> bool {
+    let row_h = ui.text_style_height(&egui::TextStyle::Body) + 3.0;
+    let total_w: f32 = cols.iter().map(|c| c.width).sum();
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(total_w, row_h), Sense::click());
+
+    if is_selected {
+        ui.painter().rect_filled(rect, 0.0, Color32::from_rgb(9, 118, 234));
+    } else if resp.hovered() {
+        ui.painter().rect_filled(rect, 0.0, Color32::from_rgb(229, 243, 255));
+    }
+
+    let font_id = egui::TextStyle::Body.resolve(ui.ctx().style().as_ref());
+    let text_color = if is_selected { Color32::WHITE } else { Color32::BLACK };
+    let texts = book_cell_texts(b);
+    let mut x = 0.0_f32;
+    for (c, t) in cols.iter().zip(texts.iter()) {
+        let cell = Rect::from_min_size(
+            egui::pos2(rect.min.x + x, rect.min.y),
+            egui::vec2(c.width, row_h),
+        );
+        let (anchor_pos, anchor) = if c.center {
+            (cell.center(), Align2::CENTER_CENTER)
+        } else {
+            (cell.min, Align2::LEFT_CENTER)
+        };
+        ui.painter()
+            .with_clip_rect(cell)
+            .text(anchor_pos, anchor, t, font_id.clone(), text_color);
+        x += c.width;
+    }
+    resp.clicked()
+}
+
+/// The main menu bar (the original's TMainMenu). Each top-level item opens a dropdown wired to the same
+/// `State` methods the toolbar buttons use. In headless tests the menus never open, so only the buttons
+/// render (no dialogs, no blocking).
+fn render_menu_bar(ui: &mut egui::Ui, state: &mut State) {
+    ui.horizontal(|ui| {
+        ui.menu_button("Книга", |ui| {
+            if ui.button("Импорт…").clicked() {
+                do_import(state);
+            }
+            if ui.button("Удалить книгу").clicked() {
+                state.delete_selected_book();
+            }
+        });
+        ui.menu_button("Коллекция", |ui| {
+            if ui.button("Статистика").clicked() {
+                state.show_stats = true;
+            }
+            if ui.button("Настройки").clicked() {
+                state.show_settings = true;
+            }
+        });
+        ui.menu_button("Группа", |ui| {
+            if ui.button("Обновить").clicked() {
+                state.reload();
+            }
+        });
+        ui.menu_button("Редактирование", |ui| {
+            if ui.button("Настройки").clicked() {
+                state.show_settings = true;
+            }
+        });
+        ui.menu_button("Вид", |ui| {
+            for (i, name) in TABS.iter().enumerate() {
+                if ui.button(*name).clicked() {
+                    state.set_tab(i);
+                }
+            }
+        });
+        ui.menu_button("Инструменты", |ui| {
+            if ui.button("Онлайн-библиотека").clicked() {
+                state.show_online = true;
+            }
+            if ui.button("Импорт…").clicked() {
+                do_import(state);
+            }
+        });
+        ui.menu_button("Помощь", |ui| {
+            if ui.button("О программе").clicked() {
+                state.status = "MyHomeLib (Rust) — порт оригинального MyHomeLib".into();
+            }
+        });
+    });
+}
+
+/// The Поиск tab: a multi-field search form (moved here from the old top bar, matching the original) plus
+/// the virtualized results grid.
+fn render_search_view(ui: &mut egui::Ui, state: &mut State) {
+    let prev = state.filters.clone();
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Название");
+        ui.add(TextEdit::singleline(&mut state.filters.title).desired_width(160.).hint_text("…"));
+        ui.separator();
+        ui.label("Автор");
+        ui.add(TextEdit::singleline(&mut state.filters.author).desired_width(160.));
+        ui.separator();
+        ui.label("Язык");
+        ui.add(TextEdit::singleline(&mut state.filters.lang).desired_width(48.).hint_text("ru"));
+        ui.separator();
+        ui.label("Файл");
+        ui.add(TextEdit::singleline(&mut state.filters.ext).desired_width(48.).hint_text("fb2"));
+        ui.separator();
+        ui.checkbox(&mut state.filters.only_local, "только локальные");
+    });
+    if ui.button("Очистить").clicked() {
+        state.clear_search();
+    }
+    if state.filters != prev {
+        state.reload();
+    }
+    ui.separator();
+    if state.list_total == 0 && state.filters.is_empty() {
+        ui.label(RichText::new("Введите условия поиска").weak());
+    } else {
+        render_book_grid(ui, state);
+    }
+}
+
+/// The Список загрузок tab: the download queue (title / progress / status), mirroring the original's
+/// queue columns. Rows are gathered into owned data first so the cancel button can mutate `state` without
+/// a borrow conflict.
+fn render_downloads_view(ui: &mut egui::Ui, state: &mut State) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(format!("Список загрузок ({})", state.downloads.len())).strong());
+        if ui.add_enabled(state.downloads.pending() > 0, egui::Button::new("Отменить все")).clicked() {
+            state.downloads.cancel_all();
+        }
+    });
+    ui.separator();
+    let rows: Vec<(u64, String, f64, String, bool)> = state
+        .downloads
+        .iter()
+        .map(|it| {
+            let (kind, frac) = match &it.status {
+                ItemStatus::Queued => ("в очереди".to_string(), 0.0),
+                ItemStatus::Active { .. } => ("загрузка".to_string(), it.status.fraction()),
+                ItemStatus::Done => ("готово".to_string(), 1.0),
+                ItemStatus::Failed(e) => (format!("ошибка: {e}"), 1.0),
+                ItemStatus::Cancelled => ("отменено".to_string(), 1.0),
+            };
+            let cancellable = matches!(it.status, ItemStatus::Queued | ItemStatus::Active { .. });
+            (it.id, it.label.clone(), frac, kind, cancellable)
+        })
+        .collect();
+    if rows.is_empty() {
+        ui.label(RichText::new("(нет загрузок)").weak());
+    } else {
+        ScrollArea::vertical().show(ui, |ui| {
+            for (id, label, frac, kind, cancellable) in rows {
+                ui.horizontal(|ui| {
+                    if kind == "загрузка" {
+                        ui.add(ProgressBar::new(frac as f32).text(format!("{:.0}%", frac * 100.0)));
+                    } else {
+                        let color = if kind.starts_with("ошибка") || kind == "отменено" {
+                            Color32::RED
+                        } else {
+                            Color32::LIGHT_GRAY
+                        };
+                        ui.colored_label(color, &kind);
+                    }
+                    ui.label(&label);
+                    if cancellable && ui.small_button("отменить").clicked() {
+                        state.downloads.cancel(id);
+                    }
+                });
+            }
+        });
     }
 }

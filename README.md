@@ -64,17 +64,21 @@ cargo run -- export  demo.db <book-id> out.fb2  # rebuild a book's metadata as F
 ## GUI (Phases 4–6)
 The windowed app is egui/eframe. The navigation **state** is pure Rust and the **view** is pure egui, so
 both are tested headlessly (`cargo test`). Only the native window runner needs winit/GL, behind the
-`gui` feature. Phase 5 adds a multi-field search (title / author / lang / ext / local-only), a
-statistics dialog (totals + by-language / by-extension breakdowns), and settings persisted to an INI at
-`<db>.ini` (reader associations, active tab, window size — matching the original's `TMHLSettings`). The
-top-bar **Import…** button opens a native folder picker (`rfd`) and imports every `.fb2`/`.fbd` under it with
-the same headless engine as the CLI, then rebuilds the tree and list.
+`gui` feature. The window mirrors the original Delphi app's layout (D14): a classic light-gray Win32-style
+theme, a menu bar (Книга / Коллекция / Группа / Редактирование / Вид / Инструменты / Помощь), an icon toolbar
+of the key actions, and six page-control tabs — **Авторы / Серии / Жанры** (each a left tree + virtualized
+multi-column book grid: Название / № / Размер / Рейтинг / Добавлено), **Поиск** (the multi-field search form +
+results), **Группы** (folder-based grouping), and **Список загрузок** (the download queue). A bottom info band
+shows the selected book's details + genres, with a status bar beneath.
 
-Phase 6 adds the **Online** tab: a Librusec connection editor (user / password / URL / connection
-script, persisted under `[Librusec]` in `<db>.ini`), a background catalog search over an INPX feed, and
-a download queue with per-item progress + cancel. The engine (connection-script interpreter, INPX
-parser, queue) is pure Rust and unit-tested against a mock transport; only the live HTTP edge uses
-`reqwest` (`rustls-tls`, no OpenSSL DLLs on Windows).
+Features: multi-field search (title / author / lang / ext / local-only), a statistics dialog (totals + by-language
+/ by-extension breakdowns), settings persisted to an INI at `<db>.ini` (readers, active tab, window size — matching
+the original's `TMHLSettings`), and **Import…** which opens a native folder picker (`rfd`) and imports every
+`.fb2`/`.fbd` under it with the same headless engine as the CLI. The **Online** panel (Librusec) adds a connection
+editor, a background catalog search over an INPX feed, and a download queue with per-item progress + cancel; its
+engine is pure Rust and unit-tested against a mock transport, only the live HTTP edge uses `reqwest`
+(`rustls-tls`, no OpenSSL DLLs on Windows). egui approximates — but can't pixel-replicate — the original's beveled
+native controls.
 
 ```sh
 cargo run --features gui --bin myhomelib-gui [db-path]   # open the GUI (needs a display)

@@ -1,8 +1,10 @@
 name: Windows build
 
 on:
+  # Build + publish a versioned Windows release when a new tag is cut (tags point at commits on main).
+  # `workflow_dispatch` stays for manual test runs.
   push:
-    branches: [main]
+    tags: ['*'] # any new tag; narrow to e.g. ['v[0-9]+.*'] if you only want version tags
   workflow_dispatch: {}
 
 jobs:
@@ -34,12 +36,14 @@ jobs:
       - name: Build (release, CLI + GUI)
         run: cargo build --release --features gui
 
-      - name: Collect binaries
+      - name: Collect binaries (named by the triggering tag)
         shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item target/release/myhomelib.exe dist/
-          Copy-Item target/release/myhomelib-gui.exe dist/
+          Copy-Item target/release/myhomelib-gui.exe "dist/myhomelib-gui-$env:TAG.exe"
+          Copy-Item target/release/myhomelib.exe "dist/myhomelib-$env:TAG.exe"
           Get-ChildItem dist | Format-Table Name, @{N='KB';E={[math]::Round($_.Length/1KB)}}
 
       - name: Upload artifacts
@@ -49,15 +53,16 @@ jobs:
           path: dist/*.exe
           if-no-files-found: error
 
-      # Stable-tagged release -> permanent download URL that always points at the newest build.
+      # One release per tag -> a stable, versioned download URL (myhomelib-gui-<tag>.exe). Only tag pushes
+      # publish; a manual workflow_dispatch builds + uploads artifacts without creating a release.
       - name: Publish to GitHub Release
+        if: github.event_name == 'push'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: windows-x86_64
-          name: Windows x86_64 (latest)
+          tag_name: ${{ github.ref_name }}
+          name: Windows x86_64 (${{ github.ref_name }})
           files: |
-            dist/myhomelib.exe
-            dist/myhomelib-gui.exe
+            dist/*.exe
           draft: false
           prerelease: false
           fail_on_unmatched_files: true

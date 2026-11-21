@@ -1,0 +1,58 @@
+name: Windows build (devel)
+
+# Two-track Windows CI:
+#   - "Windows build"        -> runs on a NEW TAG (cut from main) and publishes a versioned RELEASE
+#                               (myhomelib-gui-<tag>.exe). That's the official release path.
+#   - THIS workflow          -> runs on every PUSH to `devel` and uploads build ARTIFACTS only (no
+#                               release), so each devel commit yields a downloadable .exe to preview/test
+#                               the GUI without cutting a tag. A branch push is not a tag, so the two
+#                               workflows never double-fire on the same event.
+on:
+  push:
+    branches: [devel]
+  workflow_dispatch: {}
+
+jobs:
+  build-windows-devel:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Cache cargo + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: win-cargo-devel-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+
+      # One build produces both binaries (the `gui` feature enables eframe and the GUI bin).
+      - name: Build (release, CLI + GUI)
+        run: cargo build --release --features gui
+
+      # Name the exes by the short commit SHA so a downloaded file is self-identifying.
+      - name: Collect binaries (named by the commit)
+        shell: pwsh
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $short = $env:SHA.Substring(0, 7)
+          Copy-Item target/release/myhomelib-gui.exe "dist/myhomelib-gui-$short.exe"
+          Copy-Item target/release/myhomelib.exe "dist/myhomelib-$short.exe"
+          Get-ChildItem dist | Format-Table Name, @{N='KB';E={[math]::Round($_.Length/1KB)}}
+
+      # Artifacts only — no GitHub Release is created (that's the tag workflow's job).
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: myhomelib-windows-devel
+          path: dist/*.exe
+          if-no-files-found: error
