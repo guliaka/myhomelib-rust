@@ -347,6 +347,21 @@ impl SystemDb {
 const SELECT_BASE: &str = "SELECT bs.DatabaseID, bs.BaseName, bs.RootFolder, bs.DBFileName, bs.Code, \
      bs.DataVersion, bs.Notes, bs.LibUser, bs.LibPassword, bs.URL, bs.ConnectionScript FROM Bases bs";
 
+/// Where the system database lives when the caller doesn't say: the original's per-user data
+/// folder. Windows: `%APPDATA%\MyHomeLib\user.dbs2`; elsewhere: XDG data dir (usually
+/// `~/.local/share/myhomelib/user.dbs2`). GUI collection management uses this by default.
+pub fn default_sysdb_path() -> PathBuf {
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        return PathBuf::from(appdata).join("MyHomeLib").join(SYSTEM_DATABASE_FILENAME);
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let base = match std::env::var("XDG_DATA_HOME") {
+        Ok(x) if !x.is_empty() => PathBuf::from(x),
+        _ => PathBuf::from(home).join(".local").join("share"),
+    };
+    base.join("myhomelib").join(SYSTEM_DATABASE_FILENAME)
+}
+
 /// `C:\…` or `\\server\share\…` — absolute on Windows even when this build runs elsewhere.
 fn is_windows_absolute(s: &str) -> bool {
     let b = s.as_bytes();

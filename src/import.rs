@@ -3,9 +3,11 @@
 //! position in container — matching the original), and insert new books through the Phase 1 DAO.
 
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
+use zip::ZipArchive;
 
 use crate::core::Book;
 use crate::db::Db;
@@ -36,6 +38,9 @@ pub struct Importer<'a> {
     root: PathBuf,
     /// When true, each book's FB2 `<genre>` code is also registered in the `Genres` catalog if missing.
     register_genres: bool,
+    /// Parse failures of individual books *inside* a zip archive — they must not abort the whole
+    /// archive scan, so they're collected here and folded into the report by `import_dir`.
+    member_errors: Vec<(PathBuf, String)>,
 }
 
 impl<'a> Importer<'a> {
@@ -44,6 +49,7 @@ impl<'a> Importer<'a> {
             db,
             root: root.as_ref().to_path_buf(),
             register_genres: false,
+            member_errors: Vec::new(),
         }
     }
 
@@ -53,11 +59,17 @@ impl<'a> Importer<'a> {
         self
     }
 
-    /// Recursively import every `.fb2` / `.fbd` file under `dir`.
+    /// Recursively import every `.fb2` / `.fbd` file — and every `.fb2` book inside every `.zip`
+    /// archive — under `dir` (the original's folder import scans fb2.zip archives the same way).
     pub fn import_dir(&mut self, dir: &Path) -> Result<ImportReport> {
         let mut report = ImportReport::default();
         for path in collect_ebook_files(dir)? {
-            match self.import_file(&path) {
+            let outcomes = if is_zip(&path) {
+                self.import_zip(&path)
+            } else {
+                self.import_file(&path)
+            };
+            match outcomes {
                 Ok(outcomes) => {
                     for o in outcomes {
                         match o {
@@ -69,6 +81,7 @@ impl<'a> Importer<'a> {
                 Err(e) => report.errors.push((path.clone(), e.to_string())),
             }
         }
+        report.errors.append(&mut self.member_errors);
         Ok(report)
     }
 
@@ -99,6 +112,48 @@ impl<'a> Importer<'a> {
             }
             _ => Err(AppError::Other(format!("unsupported file type: {}", path.display()))),
         }
+    }
+
+    /// Import every `.fb2` book inside a `.zip` archive — the classic `fb2-NNNNNN-NNNNNN.zip`
+    /// collections shipped without an INPX index. The archive is the *source file*: `folder` is its
+    /// path relative to the root, `file_name` its stem (without extension), and each book's
+    /// `inside_no` is its position among the FB2 entries — the same identity scheme the INPX
+    /// importer writes, so opening the book later can locate it in the archive.
+    pub fn import_zip(&mut self, path: &Path) -> Result<Vec<ImportOutcome>> {
+        let file =
+            fs::File::open(path).map_err(|e| AppError::Other(format!("open {}: {e}", path.display())))?;
+        let mut zip = ZipArchive::new(file)
+            .map_err(|e| AppError::Other(format!("open zip {}: {e}", path.display())))?;
+        let mut outcomes = Vec::new();
+        let mut inside_no = 0i32;
+        for i in 0..zip.len() {
+            let mut entry = zip
+                .by_index(i)
+                .map_err(|e| AppError::Other(format!("zip entry {i} of {}: {e}", path.display())))?;
+            let name = entry
+                .name()
+                .map(|c| c.into_owned())
+                .unwrap_or_else(|_| format!("entry-{i}"));
+            if entry.is_dir() || !name.to_ascii_lowercase().ends_with(".fb2") {
+                continue; // covers and other side files are not books
+            }
+            let size = entry.size();
+            let mut data = Vec::with_capacity(size as usize);
+            entry
+                .read_to_end(&mut data)
+                .map_err(|e| AppError::Other(format!("read {name} in {}: {e}", path.display())))?;
+            match parse_fb2(&data) {
+                Ok(fb2) => {
+                    outcomes.push(self.insert_from_fb2(&fb2, path, inside_no, "fb2", size)?);
+                    inside_no += 1;
+                }
+                // A bad member must not kill the whole archive; report and keep scanning.
+                Err(e) => {
+                    self.member_errors.push((path.join(&name), e.to_string()));
+                }
+            }
+        }
+        Ok(outcomes)
     }
 
     /// Extract metadata from one FB2 document and insert it (or report it as already present).
@@ -197,7 +252,7 @@ impl<'a> Importer<'a> {
     }
 }
 
-/// Recursively collect `.fb2` / `.fbd` files under `dir`, sorted for determinism.
+/// Recursively collect `.fb2` / `.fbd` / `.zip` files under `dir`, sorted for determinism.
 fn collect_ebook_files(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     walk(dir, &mut out)?;
@@ -225,8 +280,12 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
 fn is_ebook(p: &Path) -> bool {
     matches!(
         p.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase()).as_deref(),
-        Some("fb2") | Some("fbd")
+        Some("fb2") | Some("fbd") | Some("zip")
     )
+}
+
+fn is_zip(p: &Path) -> bool {
+    p.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase()).as_deref() == Some("zip")
 }
 
 /// File size in bytes (0 if unknown).

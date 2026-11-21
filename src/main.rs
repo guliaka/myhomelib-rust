@@ -122,6 +122,7 @@ fn cmd_stats(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Folder import now also scans `.zip` archives of FB2 books (the no-INPX `fb2-…zip` collections).
 fn cmd_import(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut path = None;
     let mut dir = None;
@@ -335,7 +336,7 @@ fn print_usage() {
          \x20 myhomelib init    <db-path> [--demo]\n\
          \x20 myhomelib books   <db-path> [--query Q] [--author A] [--limit N] [--offset M]\n\
          \x20 myhomelib stats   <db-path>\n\
-         \x20 myhomelib import  <db-path> <dir> [--register-genres]\n\
+         \x20 myhomelib import  <db-path> <dir> [--register-genres]  (scans .fb2/.fbd/.zip)\n\
          \x20 myhomelib genres  <db-path> [--seed | --file <path>]\n\
          \x20 myhomelib export  <db-path> <book-id> <out.fb2>\n\
          \x20 myhomelib import-inpx <db-path> <file.inpx> [--root <books-dir>]\n\

@@ -30,8 +30,8 @@ with a reason — nothing is dropped silently.
 
 | # | Area | State | Left |
 |---|------|-------|------|
-| 1 | INPX + archive-backed collections, background import | **engine, CLI, GUI job done** (D16, D18). fb2.zip archive *scan* import (no INPX) not ported | 2 |
-| 2 | Multiple collections | **system DB + CLI done** (D17). GUI: collection switcher, new-collection wizard, properties, delete | 4–5 |
+| 1 | INPX + archive-backed collections, background import | **done** (D16, D18, D21: fb2.zip archive scan import; INPX root + DataVersion mirror in the GUI job) | 0 |
+| 2 | Multiple collections | **done** (D17 + D22: GUI switcher, wizard, properties, delete) | 0 |
 | 3 | Open a book in a reader (extract from archive, launch), book-info dialog with cover | not started | 3–4 |
 | 4 | User data: groups UI + membership, favourites, rating, read flag, reviews, import/export | group registry only (D17) | 4–5 |
 | 5 | Editing: book / author / series / genre dialogs, add non-FB2, convert to FBD | not started | 6–8 |
@@ -298,6 +298,32 @@ These were read from the FreePascal source, not guessed — implementers should 
 
 ---
 
+### D21 — Archive (fb2.zip) scan import without an INPX
+The folder importer now also scans `.zip` archives: each `.fb2` member is parsed and inserted with
+the archive as the *source file* — `folder` = the zip's path relative to the import root,
+`file_name` = the zip's stem, `inside_no` = position among the FB2 members, size from the member.
+That is exactly the identity scheme the INPX importer writes (D16), so a scanned collection is
+indistinguishable from an INPX-built one and a later "open from archive" finds the book the same
+way. Non-book members (covers) are skipped; a corrupt FB2 member is reported in the import errors
+and the scan continues — one bad file can't kill a whole archive. Dedupe is by archive identity, so
+re-importing the same folder adds nothing. Reached from the CLI (`myhomelib import <db> <dir>`),
+the menu «Книга → Импорт…» and the folder-import background job — no separate entry point.
+
+### D22 — Multiple collections in the GUI (switcher, wizard, properties, delete)
+The GUI now manages the collection registry (D17's system DB) instead of knowing one hard-wired
+collection. `State` carries the system-database path (`user.dbs2`, resolved per-user — `%APPDATA%`
+on Windows, XDG data dir elsewhere) and gains headless-tested methods: `switch_collection` (closes
+the current `Db`, builds a fresh `State` around the new one — settings/trees/list are per-collection),
+`create_collection_from_wizard`, `register_current_collection`, `load/save_collection_props`,
+`delete_collection` (capturing "was current" *before* the registry row goes, switching to the first
+remaining collection afterwards). The view adds: a right-aligned collection combo on the tab bar
+(switcher), menu «Коллекция → Выбрать / Новая / Свойства», a manager window (open / properties /
+delete per row, optional file removal, «подключить текущую»), a wizard (name + db file + books
+folder, native pickers in the windowed build), and a properties dialog over the registry's editable
+fields. INPX imports from the GUI now pass the registered root (online collections can flag
+already-downloaded books) and mirror the collection's `DataVersion` into the registry on completion
+— parity with the CLI path.
+
 ## Verification log
 
 - **Phase 1** — `cargo test` (integration: schema init idempotency, author/series dedup, search-column
@@ -365,3 +391,15 @@ These were read from the FreePascal source, not guessed — implementers should 
   collection field by field apart from the documented deltas (D20). CLI e2e on a synthetic 1M-record INPX: `collections create … --inpx` → 1,000,000 books in 167 s, re-import
   adds 0. The windowed binary was run against that collection under Xvfb (software GL) and screenshotted:
   tree and grid populated, genre names resolved. Still not run on Windows.
+
+- **D21 + D22 (branch GLM, off fable-t1)** — Folder import scans `.zip` archives: identity matches
+  the INPX scheme (folder = zip path, file_name = zip stem, inside_no = member position, size from
+  the member); covers skipped, a corrupt member is reported and the scan continues; re-import dedupes.
+  GUI collection management over the system DB: switcher combo on the tab bar, «Коллекция» menu
+  (Выбрать / Новая / Свойства), manager window (open/properties/delete + optional file removal +
+  register-current), wizard with native pickers (windowed build), properties dialog; switching
+  rebuilds the whole per-collection state; GUI INPX import passes the registered root and mirrors
+  DataVersion into the registry on finish. `cargo test` green (54 total: +2 zip-scan import,
+  +2 collection-manager, +1 dialogs headless render), `cargo build` and `cargo build --features gui`
+  clean with no warnings. CLI e2e: real zip with an FB2 member → `import` → 1 book, re-import →
+  0 added. Still not run on Windows.

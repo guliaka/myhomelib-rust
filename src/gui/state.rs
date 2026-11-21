@@ -13,6 +13,7 @@ use crate::jobs::Job;
 use crate::librusec::catalog::{Catalog, CatalogBook};
 use crate::librusec::queue::DownloadQueue;
 use crate::settings::Settings;
+use crate::sysdb::{default_sysdb_path, CollectionInfo, SystemDb};
 
 /// Which tree node is selected in the left panel.
 #[derive(Debug, Clone, PartialEq)]
@@ -171,11 +172,43 @@ pub struct State {
     /// set the view shows only the progress page, so the UI connection issues no queries that could
     /// wait on the job's write lock.
     pub job: Option<Job>,
+    // ------------------------------------------------------------------ collections (system DB)
+    /// Path of the system database (`user.dbs2`) that the collection manager works on.
+    pub sysdb_path: PathBuf,
+    // Dialog visibility.
+    pub show_collections: bool,
+    pub show_new_collection: bool,
+    pub show_collection_props: bool,
+    /// Wizard buffers: new collection name / database file / books root folder.
+    pub new_col_name: String,
+    pub new_col_file: String,
+    pub new_col_root: String,
+    /// Properties dialog: which registered collection the buffers edit.
+    pub props_col_id: Option<i64>,
+    /// «Also delete the collection database file» checkbox in the collections manager.
+    pub col_delete_file: bool,
+    pub props_name: String,
+    pub props_root: String,
+    pub props_notes: String,
+    pub props_url: String,
+    pub props_user: String,
+    pub props_pass: String,
+    pub props_script: String,
+    /// Set by an INPX import so `finish_job` mirrors the collection's data version into the
+    /// registry afterwards (the CLI path does it inline).
+    pending_version_sync: bool,
 }
 
 impl State {
     pub fn new(db: Db, db_path: impl Into<PathBuf>) -> Self {
+        Self::with_sysdb(db, db_path, default_sysdb_path())
+    }
+
+    /// Like [`State::new`] with an explicit system-database path — used by tests so they never
+    /// touch the real per-user `user.dbs2`.
+    pub fn with_sysdb(db: Db, db_path: impl Into<PathBuf>, sysdb_path: impl Into<PathBuf>) -> Self {
         let db_path = db_path.into();
+        let sysdb_path = sysdb_path.into();
         let settings = Settings::load(&db_path);
         // Read the persisted Librusec config before `settings` is moved into the struct below.
         let active_tab = settings.active_tab().min(TABS.len() - 1);
@@ -219,6 +252,23 @@ impl State {
             lib_url,
             lib_script,
             job: None,
+            sysdb_path,
+            show_collections: false,
+            show_new_collection: false,
+            show_collection_props: false,
+            new_col_name: String::new(),
+            new_col_file: String::new(),
+            new_col_root: String::new(),
+            props_col_id: None,
+            col_delete_file: false,
+            props_name: String::new(),
+            props_root: String::new(),
+            props_notes: String::new(),
+            props_url: String::new(),
+            props_user: String::new(),
+            props_pass: String::new(),
+            props_script: String::new(),
+            pending_version_sync: false,
         };
         s.reload();
         s
@@ -449,11 +499,19 @@ impl State {
             return false;
         }
         let (db_path, inpx) = (self.db_path.clone(), inpx.to_path_buf());
+        // The registered root (if the collection is registered) lets an online INPX collection
+        // flag books that are already downloaded.
+        let root = self
+            .current_collection_id()
+            .and_then(|id| self.system_db().ok().and_then(|s| s.collection(id).ok().flatten()))
+            .map(|c| c.root_folder);
         let title = format!("Импорт INPX: {}", inpx.display());
         self.job = Some(Job::spawn(title, move |p| {
             let db = Db::open(&db_path)?;
-            Ok(import_inpx(&db, &inpx, &InpxOptions::default(), p)?.summary())
+            let opts = InpxOptions { root, ..Default::default() };
+            Ok(import_inpx(&db, &inpx, &opts, p)?.summary())
         }));
+        self.pending_version_sync = true; // mirror DataVersion into the registry on finish
         true
     }
 
@@ -496,6 +554,19 @@ impl State {
         self.tree_built = [false; 6];
         self.genre_win_key = None;
         self.reload();
+        // An INPX import set the collection's DataVersion — mirror it into the registry (the CLI
+        // path does this inline after `import-inpx`).
+        if self.pending_version_sync {
+            self.pending_version_sync = false;
+            if let Some(id) = self.current_collection_id() {
+                if let (Ok(version), Ok(sys)) = (
+                    self.db.get_prop_int(crate::db::props::PROP_DATAVERSION),
+                    self.system_db(),
+                ) {
+                    let _ = sys.set_data_version(id, version);
+                }
+            }
+        }
     }
 
     /// Total (non-deleted) book count, for the top bar.
@@ -530,6 +601,196 @@ impl State {
     pub fn save_window_size(&mut self, size: [f32; 2]) {
         self.settings.set_window_size(size);
         let _ = self.settings.save(&self.db_path);
+    }
+
+    // ------------------------------------------------------------------ collections (system DB)
+
+    /// Open the system database the collection manager works on.
+    fn system_db(&self) -> crate::error::Result<SystemDb> {
+        SystemDb::open(&self.sysdb_path)
+    }
+
+    /// All registered collections (empty when there is no registry yet).
+    pub fn collections(&self) -> Vec<CollectionInfo> {
+        self.system_db().and_then(|s| s.collections()).unwrap_or_default()
+    }
+
+    /// Id of the registered collection currently open, if it is registered at all.
+    pub fn current_collection_id(&self) -> Option<i64> {
+        let want = std::path::absolute(&self.db_path).unwrap_or_else(|_| self.db_path.clone());
+        self.collections().into_iter().find(|c| c.db_file == want).map(|c| c.id)
+    }
+
+    /// Name of the open collection for display, or `None` when it is not registered.
+    pub fn current_collection_name(&self) -> Option<String> {
+        self.current_collection_id().and_then(|id| {
+            self.system_db().ok().and_then(|s| s.collection(id).ok().flatten()).map(|c| c.name)
+        })
+    }
+
+    /// Close the current collection and open a registered one in its place. A fresh [`State`] is
+    /// built around the new database (settings, trees, list — everything is per-collection), keeping
+    /// the system-database path. Returns false (and reports why) when the collection or its file
+    /// is missing.
+    pub fn switch_collection(&mut self, id: i64) -> bool {
+        let info = match self.system_db().ok().and_then(|s| s.collection(id).ok().flatten()) {
+            Some(i) => i,
+            None => {
+                self.status = format!("Коллекция #{id} не найдена");
+                return false;
+            }
+        };
+        match Db::open(&info.db_file) {
+            Ok(db) => {
+                let path = info.db_file.clone();
+                let name = info.name.clone();
+                let sys = self.sysdb_path.clone();
+                *self = Self::with_sysdb(db, path, sys);
+                self.status = format!("Открыта коллекция «{name}»");
+                true
+            }
+            Err(e) => {
+                self.status = format!("Не удалось открыть {}: {e}", info.db_file.display());
+                false
+            }
+        }
+    }
+
+    /// Create a new, empty collection from the wizard buffers (`new_col_name/file/root`) and open
+    /// it. Returns false (status says why) on a validation or creation error.
+    pub fn create_collection_from_wizard(&mut self) -> bool {
+        let name = self.new_col_name.trim().to_string();
+        let file = PathBuf::from(self.new_col_file.trim());
+        let root = PathBuf::from(self.new_col_root.trim());
+        if name.is_empty() || file.as_os_str().is_empty() {
+            self.status = "Укажите название и файл базы коллекции".into();
+            return false;
+        }
+        let sys = match self.system_db() {
+            Ok(s) => s,
+            Err(e) => {
+                self.status = format!("Системная база: {e}");
+                return false;
+            }
+        };
+        // Default the books root to the database file's folder, like the original's wizard.
+        let root = if root.as_os_str().is_empty() {
+            file.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."))
+        } else {
+            root
+        };
+        match sys.create_collection(&name, &root, &file, crate::db::props::CT_PRIVATE_FB, None) {
+            Ok(id) => {
+                self.show_new_collection = false;
+                self.switch_collection(id)
+            }
+            Err(e) => {
+                self.status = format!("Не удалось создать коллекцию: {e}");
+                false
+            }
+        }
+    }
+
+    /// Register the currently open (but unregistered) collection so it appears in the switcher.
+    /// The name defaults to the database file's stem; the books root to its folder.
+    pub fn register_current_collection(&mut self, name: &str) -> bool {
+        let name = if name.trim().is_empty() {
+            self.db_path.file_stem().and_then(|s| s.to_str()).unwrap_or("Коллекция").to_string()
+        } else {
+            name.trim().to_string()
+        };
+        let root = self.db_path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+        match self.system_db().and_then(|s| s.register_collection(&self.db_path, &name, &root)) {
+            Ok(_) => {
+                self.status = format!("Коллекция «{name}» подключена");
+                true
+            }
+            Err(e) => {
+                self.status = format!("Не удалось подключить коллекцию: {e}");
+                false
+            }
+        }
+    }
+
+    /// Load a registered collection's properties into the editor buffers (properties dialog).
+    pub fn load_collection_props(&mut self, id: i64) -> bool {
+        let Some(info) = self.system_db().ok().and_then(|s| s.collection(id).ok().flatten()) else {
+            self.status = format!("Коллекция #{id} не найдена");
+            return false;
+        };
+        self.props_col_id = Some(id);
+        self.props_name = info.name;
+        self.props_root = info.root_folder.to_string_lossy().into_owned();
+        self.props_notes = info.notes;
+        self.props_url = info.url;
+        self.props_user = info.user;
+        self.props_pass = info.password;
+        self.props_script = info.script;
+        self.show_collection_props = true;
+        true
+    }
+
+    /// Save the properties-dialog buffers back to the registry.
+    pub fn save_collection_props(&mut self) -> bool {
+        let Some(id) = self.props_col_id else { return false };
+        let root = PathBuf::from(self.props_root.trim());
+        let root = if root.as_os_str().is_empty() {
+            self.db_path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."))
+        } else {
+            root
+        };
+        let res = self.system_db().and_then(|s| {
+            s.update_collection(
+                id,
+                self.props_name.trim(),
+                &root,
+                self.props_notes.trim(),
+                self.props_url.trim(),
+                self.props_user.trim(),
+                self.props_pass.trim(),
+                self.props_script.trim(),
+            )
+        });
+        match res {
+            Ok(()) => {
+                self.status = "Свойства коллекции сохранены".into();
+                self.show_collection_props = false;
+                true
+            }
+            Err(e) => {
+                self.status = format!("Не удалось сохранить свойства: {e}");
+                false
+            }
+        }
+    }
+
+    /// Delete a registered collection (and optionally its database file). Deleting the currently
+    /// open collection switches to the first remaining one; if none remain the (possibly deleted)
+    /// database stays open and the status bar says so.
+    pub fn delete_collection(&mut self, id: i64, remove_file: bool) -> bool {
+        let sys = match self.system_db() {
+            Ok(s) => s,
+            Err(e) => {
+                self.status = format!("Системная база: {e}");
+                return false;
+            }
+        };
+        // Must be decided before the registry row goes away — afterwards the open collection
+        // no longer resolves to an id.
+        let was_current = self.current_collection_id() == Some(id);
+        if let Err(e) = sys.delete_collection(id, remove_file) {
+            self.status = format!("Не удалось удалить коллекцию: {e}");
+            return false;
+        }
+        self.status = format!("Коллекция #{id} удалена");
+        if was_current {
+            if let Some(next) = self.collections().first() {
+                self.switch_collection(next.id);
+            } else {
+                self.status = "Коллекция удалена; нет другой коллекции для открытия".into();
+            }
+        }
+        true
     }
 
     // -- Online (Librusec) -------------------------------------------------

@@ -286,7 +286,8 @@ pub fn render(ctx: &egui::Context, state: &mut State, icons: &mut IconCache) {
         });
     });
 
-    // Page-control tab bar — the original's TPageControl (Авторы / Серии / Жанры / Поиск / Группы / Список загрузок).
+    // Page-control tab bar — the original's TPageControl (Авторы / Серии / Жанры / Поиск / Группы / Список загрузок),
+    // plus the collection switcher on the right (the original's collection selector).
     TopBottomPanel::top("tabbar").show(ctx, |ui| {
         ui.horizontal(|ui| {
             for (i, name) in TABS.iter().enumerate() {
@@ -294,6 +295,28 @@ pub fn render(ctx: &egui::Context, state: &mut State, icons: &mut IconCache) {
                     state.set_tab(i);
                 }
             }
+            // Collection switcher — right-aligned dropdown of registered collections.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let current = state.current_collection_id();
+                let sel_text = state
+                    .current_collection_name()
+                    .unwrap_or_else(|| "(коллекция не подключена)".to_string());
+                egui::ComboBox::from_id_salt("collection_switcher")
+                    .selected_text(sel_text)
+                    .width(220.0)
+                    .show_ui(ui, |ui| {
+                        for c in state.collections() {
+                            let label = format!("{} ({})", c.name, crate::db::props::code_label(c.code));
+                            if ui.selectable_label(current == Some(c.id), label).clicked() {
+                                state.switch_collection(c.id);
+                            }
+                        }
+                        if state.collections().is_empty() {
+                            ui.label(RichText::new("(нет зарегистрированных коллекций)").weak());
+                        }
+                    });
+                ui.label("Коллекция:");
+            });
         });
     });
 
@@ -499,6 +522,159 @@ pub fn render(ctx: &egui::Context, state: &mut State, icons: &mut IconCache) {
                 }
             });
         state.show_settings = open;
+    }
+
+    // Collections manager: the registry list with open / properties / delete (the original's
+    // collection manager). Rows are gathered into owned data first so the buttons can mutate state.
+    if state.show_collections {
+        let mut open = true;
+        let rows: Vec<(i64, String, String, bool)> = state
+            .collections()
+            .into_iter()
+            .map(|c| {
+                (
+                    c.id,
+                    c.name.clone(),
+                    format!("{} — {}", c.db_file.display(), crate::db::props::code_label(c.code)),
+                    c.db_file == std::path::absolute(&state.db_path).unwrap_or_else(|_| state.db_path.clone()),
+                )
+            })
+            .collect();
+        let current_registered = state.current_collection_id().is_some();
+        Window::new("Коллекции")
+            .open(&mut open)
+            .min_size(egui::vec2(520.0, 300.0))
+            .show(ctx, |ui| {
+                ui.checkbox(&mut state.col_delete_file, "При удалении стирать и файл базы коллекции");
+                ui.separator();
+                if rows.is_empty() {
+                    ui.label(RichText::new("(нет зарегистрированных коллекций)").weak());
+                } else {
+                    ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
+                        for (id, name, path, is_current) in rows {
+                            ui.horizontal(|ui| {
+                                let marker = if is_current { "● " } else { "  " };
+                                ui.label(format!("{marker}{name}"));
+                                ui.label(RichText::new(path).weak());
+                                if is_current {
+                                    ui.label(RichText::new("(открыта)").small());
+                                } else if ui.small_button("Открыть").clicked() {
+                                    state.switch_collection(id);
+                                }
+                                if ui.small_button("Свойства").clicked() {
+                                    state.load_collection_props(id);
+                                }
+                                // Deleting is immediate; the checkbox above controls the file.
+                                if ui.small_button("Удалить").clicked() {
+                                    state.delete_collection(id, state.col_delete_file);
+                                }
+                            });
+                        }
+                    });
+                }
+                ui.separator();
+                if !current_registered && ui.button("Подключить текущую коллекцию…").clicked() {
+                    state.register_current_collection("");
+                }
+                if ui.button("Новая коллекция…").clicked() {
+                    state.show_new_collection = true;
+                }
+            });
+        state.show_collections = open;
+    }
+
+    // New-collection wizard: name, database file, books folder.
+    if state.show_new_collection {
+        let mut open = true;
+        Window::new("Новая коллекция")
+            .open(&mut open)
+            .min_size(egui::vec2(460.0, 220.0))
+            .show(ctx, |ui| {
+                ui.label("Название:");
+                ui.add(TextEdit::singleline(&mut state.new_col_name).desired_width(420.));
+                ui.label("Файл базы коллекции:");
+                ui.horizontal(|ui| {
+                    ui.add(TextEdit::singleline(&mut state.new_col_file)
+                        .desired_width(360.)
+                        .hint_text("C:\\Библиотека\\books.hlc2"));
+                    #[cfg(feature = "gui")]
+                    if ui.small_button("…").clicked() {
+                        if let Some(f) = rfd::FileDialog::new()
+                            .set_title("Файл базы новой коллекции")
+                            .add_filter("Коллекция MyHomeLib", &["hlc2", "db"])
+                            .set_file_name("new_collection.hlc2")
+                            .save_file()
+                        {
+                            state.new_col_file = f.to_string_lossy().into_owned();
+                        }
+                    }
+                });
+                ui.label("Папка с книгами (пусто = рядом с базой):");
+                ui.horizontal(|ui| {
+                    ui.add(TextEdit::singleline(&mut state.new_col_root)
+                        .desired_width(360.)
+                        .hint_text("папка с fb2/fbd/zip"));
+                    #[cfg(feature = "gui")]
+                    if ui.small_button("…").clicked() {
+                        if let Some(d) = rfd::FileDialog::new()
+                            .set_title("Папка с книгами")
+                            .pick_folder()
+                        {
+                            state.new_col_root = d.to_string_lossy().into_owned();
+                        }
+                    }
+                });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Создать").clicked() {
+                        state.create_collection_from_wizard();
+                    }
+                    if ui.button("Отмена").clicked() {
+                        state.show_new_collection = false;
+                    }
+                });
+            });
+        state.show_new_collection = open;
+    }
+
+    // Collection properties: the editable registry fields of one registered collection.
+    if state.show_collection_props {
+        let mut open = true;
+        Window::new("Свойства коллекции")
+            .open(&mut open)
+            .min_size(egui::vec2(460.0, 380.0))
+            .show(ctx, |ui| {
+                ui.label("Название:");
+                ui.add(TextEdit::singleline(&mut state.props_name).desired_width(420.));
+                ui.label("Папка с книгами:");
+                ui.add(TextEdit::singleline(&mut state.props_root).desired_width(420.));
+                ui.label("Заметки:");
+                ui.add(TextEdit::multiline(&mut state.props_notes)
+                    .desired_width(ui.available_width())
+                    .desired_rows(2));
+                ui.label("URL:");
+                ui.add(TextEdit::singleline(&mut state.props_url).desired_width(420.));
+                ui.horizontal(|ui| {
+                    ui.label("Пользователь:");
+                    ui.add(TextEdit::singleline(&mut state.props_user).desired_width(180.));
+                    ui.label("Пароль:");
+                    ui.add(TextEdit::singleline(&mut state.props_pass).desired_width(120.).password(true));
+                });
+                ui.label("Скрипт подключения (онлайн-коллекции):");
+                ui.add(TextEdit::multiline(&mut state.props_script)
+                    .desired_width(ui.available_width())
+                    .desired_rows(3));
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Сохранить").clicked() {
+                        state.save_collection_props();
+                    }
+                    if ui.button("Отмена").clicked() {
+                        state.show_collection_props = false;
+                    }
+                });
+            });
+        state.show_collection_props = open;
     }
 
     // Online (Librusec) panel: connection config + search + results + download queue.
@@ -857,6 +1033,25 @@ fn render_menu_bar(ui: &mut egui::Ui, state: &mut State) {
             }
         });
         ui.menu_button("Коллекция", |ui| {
+            if ui.button("Выбрать коллекцию…").clicked() {
+                state.show_collections = true;
+            }
+            if ui.button("Новая коллекция…").clicked() {
+                state.show_new_collection = true;
+            }
+            if ui.button("Свойства коллекции…").clicked() {
+                // Edit the registered collection currently open, if it is registered at all.
+                match state.current_collection_id() {
+                    Some(id) => {
+                        state.load_collection_props(id);
+                    }
+                    None => {
+                        state.status =
+                            "Текущая коллекция не подключена к системе — подключите её сначала".into();
+                    }
+                }
+            }
+            ui.separator();
             if ui.button("Импорт из INPX…").clicked() {
                 ui.close_menu();
                 do_import_inpx(state);

@@ -413,3 +413,121 @@ fn inpx_import_job_shows_progress_and_refreshes_views() {
     drop(state);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Multiple collections: the wizard creates a collection, the switcher opens another one, the
+/// properties dialog renames it, and delete swaps to a remaining collection. All through the
+/// `State` methods the GUI dialogs call, with an isolated `user.dbs2` (never the real one).
+#[test]
+fn collection_manager_switch_props_delete() {
+    let Fixture { db, dir, db_path, .. } = make_fixture();
+    let sysdb = dir.join("user.dbs2");
+    let mut state = State::with_sysdb(db, db_path.clone(), sysdb.clone());
+
+    // Not registered yet — the switcher shows nothing, the id is None.
+    assert!(state.collections().is_empty());
+    assert!(state.current_collection_id().is_none());
+    assert!(state.register_current_collection("Основная"));
+    assert_eq!(state.current_collection_name().as_deref(), Some("Основная"));
+
+    // Wizard: create a second, empty collection; it becomes the open one.
+    state.new_col_name = "Вторая".into();
+    state.new_col_file = dir.join("second.hlc2").to_string_lossy().into_owned();
+    state.new_col_root = dir.join("books").to_string_lossy().into_owned();
+    assert!(state.create_collection_from_wizard());
+    assert_eq!(state.current_collection_name().as_deref(), Some("Вторая"));
+    assert_eq!(state.total_books(), 0, "the new collection is empty");
+    assert!(state.new_col_file.trim().is_empty() || state.show_new_collection == false);
+
+    // The old collection still has its books; switch back by id and see them.
+    let main_id = state
+        .collections()
+        .iter()
+        .find(|c| c.name == "Основная")
+        .expect("main registered")
+        .id;
+    assert!(state.switch_collection(main_id));
+    assert_eq!(state.current_collection_name().as_deref(), Some("Основная"));
+    assert_eq!(state.total_books(), 3, "books survived the switch");
+    assert_eq!(state.sysdb_path, sysdb, "system DB path is preserved across switches");
+
+    // Properties: rename via the dialog buffers.
+    let second_id = state
+        .collections()
+        .iter()
+        .find(|c| c.name == "Вторая")
+        .expect("second registered")
+        .id;
+    assert!(state.load_collection_props(second_id));
+    assert_eq!(state.props_name, "Вторая");
+    state.props_name = "Вторая (переименована)".into();
+    state.props_notes = "заметка".into();
+    assert!(state.save_collection_props());
+    assert!(state
+        .collections()
+        .iter()
+        .any(|c| c.name == "Вторая (переименована)" && c.notes == "заметка"));
+
+    // Delete the open collection (registry entry only): switches to the remaining one.
+    assert!(state.delete_collection(main_id, false));
+    assert_eq!(state.current_collection_name().as_deref(), Some("Вторая (переименована)"));
+    assert!(state.db_path.exists(), "registry-only delete keeps the file");
+    assert_eq!(state.collections().len(), 1);
+
+    // Delete the last one too: registry empty, status says there's nothing to switch to.
+    let last_id = state.collections()[0].id;
+    assert!(state.delete_collection(last_id, true));
+    assert!(state.collections().is_empty());
+    assert!(!dir.join("second.hlc2").exists(), "--remove-file deleted the database file");
+
+    drop(state);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Wizard validation: an empty name or file is refused and nothing is created.
+#[test]
+fn collection_wizard_requires_name_and_file() {
+    let Fixture { db, dir, db_path, .. } = make_fixture();
+    let mut state = State::with_sysdb(db, db_path, dir.join("user.dbs2"));
+
+    state.new_col_name = String::new();
+    state.new_col_file = dir.join("x.hlc2").to_string_lossy().into_owned();
+    assert!(!state.create_collection_from_wizard());
+    assert!(state.collections().is_empty());
+
+    state.new_col_name = "Имя".into();
+    state.new_col_file = String::new();
+    assert!(!state.create_collection_from_wizard());
+    assert!(state.collections().is_empty());
+
+    drop(state);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The collection dialogs render headlessly without panicking (switcher combo, manager, wizard,
+/// properties) — same pattern as `render_smoke_headless`.
+#[test]
+fn render_collection_dialogs_headless() {
+    let Fixture { db, dir, db_path, .. } = make_fixture();
+    let mut state = State::with_sysdb(db, db_path, dir.join("user.dbs2"));
+    assert!(state.register_current_collection("Основная"));
+    state.new_col_name = "Вторая".into();
+    state.new_col_file = dir.join("second.hlc2").to_string_lossy().into_owned();
+    assert!(state.create_collection_from_wizard());
+
+    let ctx = egui::Context::default();
+    let mut icons = view::IconCache::default();
+    state.show_collections = true;
+    let _ = ctx.run(egui::RawInput::default(), |ctx| view::render(ctx, &mut state, &mut icons));
+    state.show_new_collection = true;
+    let _ = ctx.run(egui::RawInput::default(), |ctx| view::render(ctx, &mut state, &mut icons));
+    assert!(state.load_collection_props(state.collections()[0].id));
+    let _ = ctx.run(egui::RawInput::default(), |ctx| view::render(ctx, &mut state, &mut icons));
+    // A frame with no dialogs open (combo renders with a registered current collection).
+    state.show_collections = false;
+    state.show_new_collection = false;
+    state.show_collection_props = false;
+    let _ = ctx.run(egui::RawInput::default(), |ctx| view::render(ctx, &mut state, &mut icons));
+
+    drop(state);
+    let _ = std::fs::remove_dir_all(&dir);
+}
