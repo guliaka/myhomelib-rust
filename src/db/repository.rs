@@ -254,39 +254,16 @@ impl Db {
     /// Insert a book and its author/genre links atomically. Computes the seven `Search*` columns.
     /// Returns the new `BookID`.
     pub fn insert_book(&mut self, b: &Book, author_ids: &[i64], genre_codes: &[&str]) -> Result<i64> {
-        let s_title = search::upper(&b.title);
-        let s_lang = b.lang.as_deref().map(search::upper);
-        let s_folder = b.folder.as_deref().map(search::upper);
-        let s_file = search::upper(&b.file_name);
-        let s_ext = b.ext.as_deref().map(search::upper);
-        let s_kw = b.key_words.as_deref().map(search::upper);
-        let s_ann = b.annotation.as_deref().map(search::upper);
-
         let tx = self.conn.transaction()?;
-        tx.execute(
-            "INSERT INTO Books (\
-                LibID, Title, SeriesID, SeqNumber, UpdateDate, LibRate, Lang, Folder, FileName, \
-                InsideNo, Ext, BookSize, IsLocal, IsDeleted, KeyWords, Rate, Progress, Annotation, Review, \
-                SearchTitle, SearchLang, SearchFolder, SearchFileName, SearchExt, SearchKeyWords, SearchAnnotation \
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26)",
-            params![
-                b.lib_id, b.title, b.series_id, b.seq_number, b.update_date, b.lib_rate, b.lang,
-                b.folder, b.file_name, b.inside_no, b.ext, b.book_size, b.is_local as i32,
-                b.is_deleted as i32, b.key_words, b.rate, b.progress, b.annotation, b.review,
-                s_title, s_lang, s_folder, s_file, s_ext, s_kw, s_ann,
-            ],
-        )?;
-        let id = tx.last_insert_rowid();
-
-        for &aid in author_ids {
-            tx.execute("INSERT OR IGNORE INTO Author_List (AuthorID, BookID) VALUES (?1,?2)", params![aid, id])?;
-        }
-        for gc in genre_codes {
-            tx.execute("INSERT OR IGNORE INTO Genre_List (GenreCode, BookID) VALUES (?1,?2)", params![gc, id])?;
-        }
-
+        let id = insert_book_on(&tx, b, author_ids, genre_codes)?;
         tx.commit()?;
         Ok(id)
+    }
+
+    /// Same as [`Self::insert_book`] but without its own transaction — for bulk importers that wrap
+    /// many inserts in one [`Db::begin`] / [`Db::commit`] pair (one commit per archive, not per book).
+    pub fn insert_book_no_tx(&self, b: &Book, author_ids: &[i64], genre_codes: &[&str]) -> Result<i64> {
+        insert_book_on(&self.conn, b, author_ids, genre_codes)
     }
 
     /// Insert many books in a single transaction — the fast path for large imports/seeding (one commit,
@@ -452,8 +429,8 @@ impl Db {
     /// Book counts per file extension (non-deleted), most frequent first.
     pub fn counts_by_ext(&self) -> Result<Vec<(String, i64)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT Ext, COUNT(*) FROM Books WHERE IsDeleted = 0 AND Ext IS NOT NULL \
-             GROUP BY Ext ORDER BY 2 DESC, 1 COLLATE MHL_SYSTEM_NOCASE",
+            "SELECT LTRIM(Ext, '.'), COUNT(*) FROM Books WHERE IsDeleted = 0 AND Ext IS NOT NULL \
+             GROUP BY 1 ORDER BY 2 DESC, 1 COLLATE MHL_SYSTEM_NOCASE",
         )?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get(1)?)))?;
         let mut out = Vec::new();
@@ -612,6 +589,43 @@ impl Db {
     }
 }
 
+/// Insert one book row + its links on `conn` (no transaction management). Statements are cached, so
+/// the bulk importers pay the prepare cost once.
+fn insert_book_on(conn: &rusqlite::Connection, b: &Book, author_ids: &[i64], genre_codes: &[&str]) -> Result<i64> {
+    let s_title = search::upper(&b.title);
+    let s_lang = b.lang.as_deref().map(search::upper);
+    let s_folder = b.folder.as_deref().map(search::upper);
+    let s_file = search::upper(&b.file_name);
+    let s_ext = b.ext.as_deref().map(search::upper);
+    let s_kw = b.key_words.as_deref().map(search::upper);
+    let s_ann = b.annotation.as_deref().map(search::upper);
+
+    conn.prepare_cached(
+        "INSERT INTO Books (\
+            LibID, Title, SeriesID, SeqNumber, UpdateDate, LibRate, Lang, Folder, FileName, \
+            InsideNo, Ext, BookSize, IsLocal, IsDeleted, KeyWords, Rate, Progress, Annotation, Review, \
+            SearchTitle, SearchLang, SearchFolder, SearchFileName, SearchExt, SearchKeyWords, SearchAnnotation \
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26)",
+    )?
+    .execute(params![
+        b.lib_id, b.title, b.series_id, b.seq_number, b.update_date, b.lib_rate, b.lang,
+        b.folder, b.file_name, b.inside_no, b.ext, b.book_size, b.is_local as i32,
+        b.is_deleted as i32, b.key_words, b.rate, b.progress, b.annotation, b.review,
+        s_title, s_lang, s_folder, s_file, s_ext, s_kw, s_ann,
+    ])?;
+    let id = conn.last_insert_rowid();
+
+    let mut al = conn.prepare_cached("INSERT OR IGNORE INTO Author_List (AuthorID, BookID) VALUES (?1,?2)")?;
+    for &aid in author_ids {
+        al.execute(params![aid, id])?;
+    }
+    let mut gl = conn.prepare_cached("INSERT OR IGNORE INTO Genre_List (GenreCode, BookID) VALUES (?1,?2)")?;
+    for gc in genre_codes {
+        gl.execute(params![gc, id])?;
+    }
+    Ok(id)
+}
+
 /// Build the WHERE clause + params for a [`BookQuery`]. Shared by search and count.
 fn search_where(q: &BookQuery) -> Result<(String, Vec<Box<dyn ToSql>>)> {
     let mut clauses: Vec<String> = Vec::new();
@@ -632,8 +646,12 @@ fn search_where(q: &BookQuery) -> Result<(String, Vec<Box<dyn ToSql>>)> {
         clauses.push(format!("b.SearchLang = ?{}", params.len()));
     }
     if let Some(e) = &q.ext {
-        params.push(Box::new(search::upper(e)));
-        clauses.push(format!("b.SearchExt = ?{}", params.len()));
+        // The original stores extensions with the leading dot (".fb2"); collections written by earlier
+        // builds of this port have them without it. Match either, whatever the user typed.
+        let bare = search::upper(e.trim().trim_start_matches('.'));
+        params.push(Box::new(bare.clone()));
+        params.push(Box::new(format!(".{bare}")));
+        clauses.push(format!("b.SearchExt IN (?{}, ?{})", params.len() - 1, params.len()));
     }
     if let Some(a) = &q.author_name_like {
         params.push(Box::new(format!("%{}%", search::upper(a))));

@@ -15,6 +15,8 @@ required-features = ["gui"]
 base64 = "0.23.1"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 egui = "0.31"
+# Legacy FB2 encodings (windows-1251 / koi8-r / utf-16) -> UTF-8 before XML parsing.
+encoding_rs = "0.8"
 eframe = { version = "0.31", optional = true }
 quick-xml = "0.42.0"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking"] }

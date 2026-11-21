@@ -11,7 +11,10 @@ pub mod fb2;
 pub mod genres;
 pub mod gui;
 pub mod import;
+pub mod inpx;
+pub mod jobs;
 pub mod librusec;
 pub mod settings;
+pub mod sysdb;
 
 pub use db::{BookQuery, CollectionStats, Db};

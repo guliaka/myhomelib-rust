@@ -13,6 +13,10 @@ use super::model::{Element, Fb2, Node};
 
 /// Parse FB2 2.1 XML bytes into a lossless element tree rooted at `<FictionBook>`.
 pub fn parse_fb2(data: &[u8]) -> Result<Fb2> {
+    // Legacy libraries are full of windows-1251 / koi8-r / utf-16 files; quick-xml (as built here)
+    // only reads UTF-8, so transcode first. UTF-8 input is borrowed untouched.
+    let data = decode_xml(data);
+    let data: &[u8] = data.as_ref();
     let mut reader = Reader::from_reader(data);
     let mut buf = Vec::new();
     let mut root_holder: Option<Element> = None;
@@ -35,6 +39,58 @@ pub fn parse_fb2(data: &[u8]) -> Result<Fb2> {
     match root_holder {
         Some(root) => Ok(Fb2 { root }),
         None => Err(AppError::Other("fb2: no <FictionBook> root element found".into())),
+    }
+}
+
+/// Parse only the metadata of an FB2: everything up to `</description>`. Import needs the title-info
+/// and nothing else, and skipping the body + base64 binaries makes scanning large archives several
+/// times faster. Falls back to a full parse when no `</description>` is found.
+pub fn parse_fb2_description(data: &[u8]) -> Result<Fb2> {
+    const END: &[u8] = b"</description>";
+    // UTF-16 is not ASCII-compatible, so the byte search below can't see the tag — decode it whole.
+    let utf16 = data.starts_with(&[0xFF, 0xFE]) || data.starts_with(&[0xFE, 0xFF]);
+    if !utf16 {
+        if let Some(pos) = find_bytes(data, END) {
+            let head = &data[..pos + END.len()];
+            let mut text = decode_xml(head).into_owned();
+            text.extend_from_slice(b"</FictionBook>");
+            return parse_fb2(&text);
+        }
+    }
+    parse_fb2(data)
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Transcode an XML document to UTF-8 bytes: honours a BOM first, then the `encoding="…"` pseudo-
+/// attribute of the XML declaration. Unknown labels and plain UTF-8 are returned as-is (borrowed).
+pub fn decode_xml(data: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    use std::borrow::Cow;
+    if let Some((enc, bom_len)) = encoding_rs::Encoding::for_bom(data) {
+        if enc == encoding_rs::UTF_8 {
+            return Cow::Borrowed(&data[bom_len..]);
+        }
+        let (text, _) = enc.decode_without_bom_handling(&data[bom_len..]);
+        return Cow::Owned(text.into_owned().into_bytes());
+    }
+    let head = &data[..data.len().min(200)];
+    let label = find_bytes(head, b"encoding=").and_then(|p| {
+        let rest = &head[p + 9..];
+        let quote = *rest.first()?;
+        if quote != b'"' && quote != b'\'' {
+            return None;
+        }
+        let end = rest[1..].iter().position(|&c| c == quote)?;
+        Some(&rest[1..1 + end])
+    });
+    match label.and_then(encoding_rs::Encoding::for_label) {
+        Some(enc) if enc != encoding_rs::UTF_8 => {
+            let (text, _, _) = enc.decode(data);
+            Cow::Owned(text.into_owned().into_bytes())
+        }
+        _ => Cow::Borrowed(data),
     }
 }
 

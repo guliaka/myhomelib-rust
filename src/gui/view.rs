@@ -265,7 +265,8 @@ pub fn render(ctx: &egui::Context, state: &mut State, icons: &mut IconCache) {
                     let file = format!(
                         "{}{}",
                         b.file_name,
-                        b.ext.as_ref().map(|e| format!(".{e}")).unwrap_or_default()
+                        // Stored with the dot by the original (".fb2"), without it by older builds.
+                        b.ext.as_ref().map(|e| format!(".{}", e.trim_start_matches('.'))).unwrap_or_default()
                     );
                     let folder = b.folder.clone();
                     let ann = b.annotation.clone();

@@ -11,5 +11,5 @@ pub mod parser;
 pub mod writer;
 
 pub use model::{AuthorInfo, Element, Fb2, Node, SeriesInfo};
-pub use parser::parse_fb2;
+pub use parser::{parse_fb2, parse_fb2_description};
 pub use writer::serialize;
