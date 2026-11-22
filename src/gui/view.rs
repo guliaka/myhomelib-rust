@@ -42,6 +42,29 @@ fn pick_import_folder() -> Option<std::path::PathBuf> {
         .pick_folder()
 }
 
+/// Native save-file picker for the new-collection wizard's `.db` file (the Windows common
+/// save dialog on the target). Compiled only with the `gui` feature, like the folder picker.
+#[cfg(feature = "gui")]
+fn pick_collection_db_file(default_name: &str) -> Option<std::path::PathBuf> {
+    rfd::FileDialog::new()
+        .set_title("Файл базы коллекции")
+        .add_filter("MyHomeLib collection (*.db)", &["db"])
+        .set_file_name(default_name)
+        .save_file()
+}
+
+/// Headless stub: no display to show a dialog from — the Browse buttons become no-ops, and tests
+/// never block on a native picker.
+#[cfg(not(feature = "gui"))]
+fn pick_collection_db_file(_default_name: &str) -> Option<std::path::PathBuf> {
+    None
+}
+
+#[cfg(not(feature = "gui"))]
+fn pick_import_folder() -> Option<std::path::PathBuf> {
+    None
+}
+
 /// Classic light-gray "desktop" styling to approximate the original's native Win32 look. egui draws its
 /// own flat widgets (it can't render beveled common controls), but a light-gray chrome + white content
 /// areas + boxy (near-zero) rounding + a classic selection blue reads as a conventional desktop app
@@ -513,16 +536,31 @@ pub fn render(ctx: &egui::Context, state: &mut State, icons: &mut IconCache) {
                     ui.label("Файл базы:");
                     ui.add(
                         TextEdit::singleline(&mut state.wizard.db_file)
-                            .desired_width(280.)
+                            .desired_width(250.)
                             .hint_text("например C:\\Books\\mylib.db"),
                     );
+                    if ui.button("Обзор…").clicked() {
+                        let default = if state.wizard.name.is_empty() {
+                            "mylib.db".to_string()
+                        } else {
+                            format!("{}.db", state.wizard.name.trim())
+                        };
+                        if let Some(p) = pick_collection_db_file(&default) {
+                            state.wizard.db_file = p.to_string_lossy().to_string();
+                        }
+                    }
                     ui.end_row();
                     ui.label("Папка с книгами:");
                     ui.add(
                         TextEdit::singleline(&mut state.wizard.root_folder)
-                            .desired_width(280.)
+                            .desired_width(250.)
                             .hint_text("(необязательно)"),
                     );
+                    if ui.button("Обзор…").clicked() {
+                        if let Some(p) = pick_import_folder() {
+                            state.wizard.root_folder = p.to_string_lossy().to_string();
+                        }
+                    }
                     ui.end_row();
                     ui.label("Заметки:");
                     ui.add(TextEdit::singleline(&mut state.wizard.notes).desired_width(280.));
