@@ -212,8 +212,42 @@ location: `$MYHOMELIB_SYSTEM_DB`, else `MyHomeLib.system.db` next to the executa
   unregistered collection and pops the wizard.
 
 *Known delta:* the system DB's cross-collection user-data tables (rate/progress/groups keyed
-`(BookID, DatabaseID)`) are created for schema fidelity but not yet written — the groups feature isn't
-ported, and book ratings are per-collection until it is.
+`(BookID, DatabaseID)`) are now **written** — groups + membership live in the system DB (D17) and
+travel through user-data export/import. The in-GUI groups tab still shows the folder tree until the
+groups view is ported.
+
+### D17 — INPX import/export + user-data (rate/progress/review + groups) import/export
+Three exchange formats, all byte-compatible with the original app:
+
+- **INPX import** (`src/inpx.rs`, the original's `TImportInpxThread`) — a ZIP of `*.inp` book
+  records (`Chr(4)` field sep, `,` author parts, `:` list items) + `structure.info` (field order,
+  defaults to the original's `DEFAULTSTRUCTURE`) + `collection.info` (6 CRLF lines: name / file /
+  content-type / notes / URL / script) + `version.info`. Local import marks books local, links
+  `Folder` to the companion `<name>.zip` with `InsideNo` = record index (exactly the original's
+  linkage) unless the record carries FOLDER; `extra.inp` is skipped (the original skips it for
+  local imports). Dedupe on source-file identity (D5) makes re-import a no-op. Imports run with
+  the schema's search-column triggers off (D2 — the DAO still computes `Search*` itself).
+- **INPX export** (`TExport2INPXThread`) — writes `books.inp` (CRLF, UTF-8) with the original's
+  exact field order `AUTHOR;GENRE;TITLE;SERIES;SERNO;FILE;SIZE;LIBID;DEL;EXT;DATE;INSNO;FOLDER;LANG;KEYWORDS`,
+  genres exported as FB2 codes when the catalog has them, plus `version.info` / `structure.info` /
+  `collection.info`. Streams in 5k pages — never loads the collection into memory.
+- **User data** (`src/userdata.rs`, `TUserData`/`acImportUserData`/`acExportUserData`) — a
+  **zlib-compressed** XML document (the original saves through `TZCompressionStream`; plain XML
+  accepted on load): `<UserData><Extras><Book id libid rate progress><Review><![CDATA[…]]></Book>…`
+  plus `<Groups><Group id name><Book id libid/>…`. Books are keyed by the stable `LibID`
+  (`BookID` is installation-local), same as the original. Extras live in the collection DB
+  (`Books.Rate/Progress/Review` — Review is a BLOB: written as UTF-8 bytes, read tolerating TEXT);
+  groups live in the **system DB** (`Groups`/`BookGroups`, keyed `BookID + DatabaseID`) with the
+  new `SystemDb` group API (upsert_group / add_group_book / list_group_books), which also ensures
+  the system-DB `Books` row exists like the original's `CopyBookToGroup`.
+- **GUI**: `Книга → Импорт INPX…`, `Коллекция → Экспорт в INPX… / Импорт/Экспорт пользовательских
+  данных…` with native file pickers; INPX import also applies `collection.info`/`version.info` to
+  the registry entry. **CLI**: `myhomelib inpx import|export <db> <file> [--system …]`,
+  `myhomelib userdata export|import <db> <file> [--system …]`.
+- New dep: `flate2` (pure Rust) for the zlib user-data file.
+
+*Known delta:* the original's group editor UI (create/rename/delete groups, assign books) is still
+unported — groups are populated via user-data import for now.
 
 ---
 

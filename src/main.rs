@@ -37,6 +37,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some("export") => cmd_export(&args[1..]),
         Some("collections") => cmd_collections(&args[1..]),
         Some("maintenance") => cmd_maintenance(&args[1..]),
+        Some("inpx") => cmd_inpx(&args[1..]),
+        Some("userdata") => cmd_userdata(&args[1..]),
         _ => {
             print_usage();
             Ok(())
@@ -305,6 +307,144 @@ fn cmd_maintenance(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// `myhomelib inpx import <db> <file.inpx>` / `myhomelib inpx export <db> <out.inpx> [--system sys.db]`.
+fn cmd_inpx(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use myhomelib::inpx::{export_inpx, import_inpx, InpxHeader};
+    let cmd = args.first().ok_or("usage: myhomelib inpx import|export <db-path> <file>")?;
+    let db_path = args.get(1).ok_or("missing <db-path>")?;
+    let file = args.get(2).ok_or("missing <file>")?;
+    match cmd.as_str() {
+        "import" => {
+            let mut db = myhomelib::db::Db::open(db_path)?;
+            let report = import_inpx(&mut db, Path::new(file))?;
+            println!(
+                "INPX import: {} imported, {} already present, {} error(s)",
+                report.imported,
+                report.existing,
+                report.errors.len()
+            );
+            for (f, e) in report.errors.iter().take(20) {
+                eprintln!("  {f}: {e}");
+            }
+        }
+        "export" => {
+            let db = myhomelib::db::Db::open(db_path)?;
+            // Registry fields for collection.info: from the system DB when the collection is
+            // registered, else from the file name alone.
+            let sys = args
+                .iter()
+                .position(|a| a == "--system")
+                .and_then(|p| args.get(p + 1))
+                .map(|s| myhomelib::systemdb::SystemDb::open(s))
+                .transpose()?;
+            let header = match sys {
+                Some(sys) => {
+                    let current = Path::new(db_path).canonicalize()?.to_string_lossy().to_string();
+                    sys.list()?
+                        .into_iter()
+                        .find(|c| {
+                            std::path::Path::new(&c.db_file_name)
+                                .canonicalize()
+                                .map(|p| p.to_string_lossy().to_string() == current)
+                                .unwrap_or(false)
+                        })
+                        .map(|c| InpxHeader {
+                            name: c.name,
+                            file_name: c.db_file_name,
+                            content_type: c.code,
+                            notes: c.notes,
+                            url: c.url,
+                            script: c.connection_script,
+                        })
+                        .unwrap_or_default()
+                }
+                None => InpxHeader {
+                    name: Path::new(db_path)
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_default(),
+                    ..Default::default()
+                },
+            };
+            let n = export_inpx(&db, Path::new(file), &header, "0")?;
+            println!("exported {n} book(s) to {file}");
+        }
+        other => return Err(format!("unknown inpx subcommand {other}").into()),
+    }
+    Ok(())
+}
+
+/// `myhomelib userdata export|import <db> <file> [--system sys.db]` — the original's
+/// acExportUserData / acImportUserData (rate/progress/review + groups, zlib-compressed XML).
+fn cmd_userdata(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use myhomelib::userdata::{
+        export_groups_from_system, import_groups_to_system, UserData,
+    };
+    let cmd = args.first().ok_or("usage: myhomelib userdata export|import <db-path> <file> [--system <sys.db>]")?;
+    let db_path = args.get(1).ok_or("missing <db-path>")?;
+    let file = args.get(2).ok_or("missing <file>")?;
+    let sys_path = args
+        .iter()
+        .position(|a| a == "--system")
+        .and_then(|p| args.get(p + 1));
+    // The collection's DatabaseID in the registry (needed for groups); 0 = unregistered.
+    let mut database_id = 0i64;
+
+    match cmd.as_str() {
+        "export" => {
+            let db = myhomelib::db::Db::open(db_path)?;
+            let mut data = UserData::from_collection(&db)?;
+            if let Some(sp) = sys_path {
+                let sys = myhomelib::systemdb::SystemDb::open(sp)?;
+                let current = Path::new(db_path).canonicalize()?.to_string_lossy().to_string();
+                if let Some(c) = sys.list()?.into_iter().find(|c| {
+                    std::path::Path::new(&c.db_file_name)
+                        .canonicalize()
+                        .map(|p| p.to_string_lossy().to_string() == current)
+                        .unwrap_or(false)
+                }) {
+                    database_id = c.id;
+                    export_groups_from_system(&mut data, &sys, database_id)?;
+                }
+            }
+            data.save(Path::new(file))?;
+            println!(
+                "user data exported to {file}: {} extra(s), {} group(s)",
+                data.extras.len(),
+                data.groups.len()
+            );
+        }
+        "import" => {
+            let mut db = myhomelib::db::Db::open(db_path)?;
+            let data = UserData::load(Path::new(file))?;
+            let (applied, missing) = data.apply_to_collection(&mut db)?;
+            let mut group_msg = String::new();
+            if let Some(sp) = sys_path {
+                let sys = myhomelib::systemdb::SystemDb::open(sp)?;
+                let current = Path::new(db_path).canonicalize()?.to_string_lossy().to_string();
+                if let Some(c) = sys.list()?.into_iter().find(|c| {
+                    std::path::Path::new(&c.db_file_name)
+                        .canonicalize()
+                        .map(|p| p.to_string_lossy().to_string() == current)
+                        .unwrap_or(false)
+                }) {
+                    database_id = c.id;
+                }
+                if database_id > 0 {
+                    let (linked, unresolved) =
+                        import_groups_to_system(&data.groups, &sys, &db, database_id)?;
+                    group_msg = format!(", {linked} group link(s) ({unresolved} unresolved)");
+                }
+            }
+            println!(
+                "user data imported: {applied} book(s) updated, {missing} not found{group_msg}"
+            );
+        }
+        other => return Err(format!("unknown userdata subcommand {other}").into()),
+    }
+    Ok(())
+}
+
 fn print_usage() {
     eprintln!(
         "myhomelib — data-layer + FB2/FBD CLI\n\
@@ -317,7 +457,9 @@ fn print_usage() {
          \x20 myhomelib genres  <db-path> [--seed | --file <path>]\n\
          \x20 myhomelib export  <db-path> <book-id> <out.fb2>\n\
          \x20 myhomelib collections <system-db> list | add <name> <db-file> [--root DIR] [--online] | remove <id> [--purge]\n\
-         \x20 myhomelib maintenance <db-path> check | compact | repair"
+         \x20 myhomelib maintenance <db-path> check | compact | repair\n\
+         \x20 myhomelib inpx import|export <db-path> <file.inpx> [--system <sys.db>]\n\
+         \x20 myhomelib userdata export|import <db-path> <file> [--system <sys.db>]"
     );
 }
 

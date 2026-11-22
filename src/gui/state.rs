@@ -758,6 +758,146 @@ impl State {
         }
     }
 
+    /// The current collection's `Bases.DatabaseID`, if it's registered in the system DB
+    /// (needed to scope group membership to this collection).
+    pub fn current_database_id(&self) -> Option<i64> {
+        let current = self.db_path.to_string_lossy().to_string();
+        self.system
+            .as_ref()
+            .and_then(|s| s.list().ok())
+            .and_then(|rows| rows.into_iter().find(|c| c.db_file_name == current).map(|c| c.id))
+    }
+
+    /// The current collection's registry entry (for the INPX export header), if registered.
+    fn current_info(&self) -> Option<CollectionInfo> {
+        let current = self.db_path.to_string_lossy().to_string();
+        self.system
+            .as_ref()
+            .and_then(|s| s.list().ok())
+            .and_then(|rows| rows.into_iter().find(|c| c.db_file_name == current))
+    }
+
+    /// `Книга → Импорт INPX…`: import a lib.rus.ec INPX into the open collection.
+    pub fn import_inpx_file(&mut self, path: &str) {
+        match crate::inpx::import_inpx(&mut self.db, Path::new(path)) {
+            Ok(report) => {
+                // Registry fields carried by collection.info/version.info, when registered.
+                if let (Some(sys), Some(info)) = (self.system.as_ref(), &self.current_info()) {
+                    if let Some(h) = &report.header {
+                        let mut updated = info.clone();
+                        if !h.notes.is_empty() {
+                            updated.notes = h.notes.clone();
+                        }
+                        if !h.url.is_empty() {
+                            updated.url = h.url.clone();
+                            updated.connection_script = h.script.clone();
+                        }
+                        if let Some(v) = report.version {
+                            updated.data_version = v;
+                        }
+                        let _ = sys.update(&updated);
+                        self.refresh_collections();
+                    }
+                }
+                self.reload();
+                self.tree_built = [false; 6];
+                self.status = format!(
+                    "INPX: {} импортировано, {} уже было, {} ошибок",
+                    report.imported,
+                    report.existing,
+                    report.errors.len()
+                );
+            }
+            Err(e) => self.status = format!("импорт INPX не удался: {e}"),
+        }
+    }
+
+    /// `Коллекция → Экспорт в INPX…`: write the collection as a lib.rus.ec-format INPX.
+    pub fn export_inpx_file(&mut self, path: &str) {
+        let header = match self.current_info() {
+            Some(c) => crate::inpx::InpxHeader {
+                name: c.name,
+                file_name: c.db_file_name,
+                content_type: c.code,
+                notes: c.notes,
+                url: c.url,
+                script: c.connection_script,
+            },
+            None => crate::inpx::InpxHeader {
+                name: self
+                    .db_path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+                ..Default::default()
+            },
+        };
+        let version = self
+            .current_info()
+            .map(|c| if c.data_version > 0 { c.data_version.to_string() } else { "0".into() })
+            .unwrap_or_else(|| "0".into());
+        match crate::inpx::export_inpx(&self.db, Path::new(path), &header, &version) {
+            Ok(n) => self.status = format!("INPX: экспортировано книг — {n}"),
+            Err(e) => self.status = format!("экспорт INPX не удался: {e}"),
+        }
+    }
+
+    /// `Коллекция → Экспорт пользовательских данных…`: rate/progress/review + groups to the
+    /// original's zlib-XML user-data file.
+    pub fn export_user_data(&mut self, path: &str) {
+        let mut data = match crate::userdata::UserData::from_collection(&self.db) {
+            Ok(d) => d,
+            Err(e) => {
+                self.status = format!("экспорт не удался: {e}");
+                return;
+            }
+        };
+        if let (Some(sys), Some(id)) = (self.system.as_ref(), self.current_database_id()) {
+            if let Err(e) = crate::userdata::export_groups_from_system(&mut data, sys, id) {
+                self.status = format!("экспорт групп не удался: {e}");
+                return;
+            }
+        }
+        match data.save(Path::new(path)) {
+            Ok(()) => self.status = format!(
+                "Пользовательские данные: {} книг, {} групп → {path}",
+                data.extras.len(),
+                data.groups.len()
+            ),
+            Err(e) => self.status = format!("экспорт не удался: {e}"),
+        }
+    }
+
+    /// `Коллекция → Импорт пользовательских данных…`: apply rates/progress/reviews to the open
+    /// collection and groups into the system DB (both keyed by the stable `LibID`).
+    pub fn import_user_data(&mut self, path: &str) {
+        let data = match crate::userdata::UserData::load(Path::new(path)) {
+            Ok(d) => d,
+            Err(e) => {
+                self.status = format!("импорт не удался: {e}");
+                return;
+            }
+        };
+        let (applied, missing) = match data.apply_to_collection(&mut self.db) {
+            Ok(r) => r,
+            Err(e) => {
+                self.status = format!("импорт не удался: {e}");
+                return;
+            }
+        };
+        let mut groups_msg = String::new();
+        if let (Some(sys), Some(id)) = (self.system.as_ref(), self.current_database_id()) {
+            match crate::userdata::import_groups_to_system(&data.groups, sys, &self.db, id) {
+                Ok((linked, unresolved)) => {
+                    groups_msg = format!(", групп: {linked} книг ({unresolved} не найдено)");
+                }
+                Err(e) => groups_msg = format!(", группы не импортированы: {e}"),
+            }
+        }
+        self.reload();
+        self.status = format!("Импорт: {applied} книг обновлено, {missing} не найдено{groups_msg}");
+    }
+
     /// Save the edited properties back to the registry.
     pub fn save_properties(&mut self) {
         let props = match self.props.take() {

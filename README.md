@@ -19,6 +19,8 @@ src/
   export.rs # headless metadata export (rebuild an FB2 from a stored book)
   settings.rs# user settings: minimal ordered INI store at `<db>.ini` (readers, tab, window size, Librusec)
   systemdb.rs# system DB: registry of collections (wizard, properties, delete) + maintenance (repair, vacuum)
+  inpx.rs   # INPX import/export (lib.rus.ec format: *.inp records + structure/collection/version info)
+  userdata.rs# user data import/export: rate/progress/review + groups (zlib XML, keyed by LibID)
   librusec/ # Librusec online client: connection-script engine, INPX catalog parser, download queue
   gui/      # egui GUI: state (pure Rust) + view (egui) + eframe window runner (`gui` feature)
   error.rs  # AppError
@@ -74,6 +76,20 @@ cargo run -- collections sys.db add "Домашняя" home.db --root /books --o
 cargo run -- collections sys.db remove 2 --purge
 cargo run -- maintenance home.db check|compact|repair
 ```
+
+## INPX + user data
+Import a lib.rus.ec **INPX** snapshot or export the collection as one, and exchange **user data**
+(ratings, reading progress, reviews, reading groups) as the original's zlib-XML file — the key is
+the stable `LibID`, so data moves between installations and collections:
+
+```sh
+cargo run -- inpx import home.db lib.inpx            # import a snapshot (deduped, re-import is a no-op)
+cargo run -- inpx export home.db out.inpx --system sys.db
+cargo run -- userdata export home.db user.mhl --system sys.db
+cargo run -- userdata import home.db user.mhl --system sys.db
+```
+Groups live in the system DB (keyed `BookID + DatabaseID`, like the original) and ride along in
+the same user-data file.
 
 ## GUI (Phases 4–6)
 The windowed app is egui/eframe. The navigation **state** is pure Rust and the **view** is pure egui, so

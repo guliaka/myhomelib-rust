@@ -26,6 +26,9 @@ thiserror = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 zip = "9.8.1"
+# zlib compression for the original's user-data exchange file (TMSXMLHelper.SaveToZFile
+# writes the XML through a TZCompressionStream — a raw zlib stream). Pure-Rust backend.
+flate2 = "1"
 
 [dev-dependencies]
 tempfile = "3"

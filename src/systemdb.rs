@@ -221,6 +221,77 @@ impl SystemDb {
         Ok(None)
     }
 
+    // -- groups (the original's cross-collection reading groups, stored in the system DB) ------
+
+    /// All groups (id, name), oldest first.
+    pub fn list_groups(&self) -> Result<Vec<(i64, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT GroupID, GroupName FROM Groups ORDER BY GroupID")?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Find or create a group by name; returns its id (the original's `ImportUserData`).
+    pub fn upsert_group(&self, name: &str) -> Result<i64> {
+        let existing: Option<i64> = self
+            .conn
+            .query_row("SELECT GroupID FROM Groups WHERE GroupName = ?1", [name], |r| r.get(0))
+            .optional()?;
+        if let Some(id) = existing {
+            return Ok(id);
+        }
+        self.conn.execute(
+            "INSERT INTO Groups (GroupName, AllowDelete) VALUES (?1, 1)",
+            [name],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Put a book into a group for a given collection. Ensures the system-DB `Books` row exists
+    /// first (the original inserts it in `CopyBookToGroup`), then the `BookGroups` link.
+    /// Idempotent — re-adding is a no-op.
+    pub fn add_group_book(
+        &self,
+        group_id: i64,
+        book_id: i64,
+        database_id: i64,
+        libid: &str,
+        title: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO Books \
+             (BookID, DatabaseID, LibID, Title, UpdateDate, LibRate, FileName, InsideNo, IsLocal, IsDeleted, Rate, Progress) \
+             VALUES (?1, ?2, ?3, ?4, '1970-01-01 00:00:00', 0, '', 0, 0, 0, 0, 0)",
+            params![book_id, database_id, libid, title],
+        )?;
+        self.conn.execute(
+            "INSERT OR IGNORE INTO BookGroups (GroupID, BookID, DatabaseID) VALUES (?1, ?2, ?3)",
+            params![group_id, book_id, database_id],
+        )?;
+        Ok(())
+    }
+
+    /// Groups with their member books for one collection: `(group_id, group_name, book_id, libid)`
+    /// (the original's group + book iterators restricted to `DatabaseID`).
+    pub fn list_group_books(&self, database_id: i64) -> Result<Vec<(i64, String, i64, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT g.GroupID, g.GroupName, b.BookID, b.LibID \
+             FROM Groups g \
+             JOIN BookGroups bg ON bg.GroupID = g.GroupID \
+             JOIN Books b ON b.BookID = bg.BookID AND b.DatabaseID = bg.DatabaseID \
+             WHERE bg.DatabaseID = ?1 ORDER BY g.GroupID, b.BookID",
+        )?;
+        let rows = stmt
+            .query_map([database_id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// Delete a collection's `.db` file and its `<db>.ini` settings. The registry row must already
     /// be gone (or removed by the caller in the same operation).
     pub fn purge_files(db_file_name: &str) -> Result<()> {

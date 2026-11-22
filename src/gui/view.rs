@@ -42,6 +42,37 @@ fn pick_import_folder() -> Option<std::path::PathBuf> {
         .pick_folder()
 }
 
+/// Native open-file picker (INPX / user-data import). gui-only.
+#[cfg(feature = "gui")]
+fn pick_open_file(title: &str, filter_name: &str, exts: &[&str]) -> Option<std::path::PathBuf> {
+    rfd::FileDialog::new()
+        .set_title(title)
+        .add_filter(filter_name, exts)
+        .pick_file()
+}
+
+/// Native save-file picker (INPX / user-data export). gui-only.
+#[cfg(feature = "gui")]
+fn pick_save_file(title: &str, filter_name: &str, exts: &[&str], default_name: &str) -> Option<std::path::PathBuf> {
+    rfd::FileDialog::new()
+        .set_title(title)
+        .add_filter(filter_name, exts)
+        .set_file_name(default_name)
+        .save_file()
+}
+
+/// Headless stubs: no display to show a dialog from — the actions become no-ops, and tests
+/// never block on a native picker.
+#[cfg(not(feature = "gui"))]
+fn pick_open_file(_title: &str, _filter_name: &str, _exts: &[&str]) -> Option<std::path::PathBuf> {
+    None
+}
+
+#[cfg(not(feature = "gui"))]
+fn pick_save_file(_title: &str, _filter_name: &str, _exts: &[&str], _default_name: &str) -> Option<std::path::PathBuf> {
+    None
+}
+
 /// Native save-file picker for the new-collection wizard's `.db` file (the Windows common
 /// save dialog on the target). Compiled only with the `gui` feature, like the folder picker.
 #[cfg(feature = "gui")]
@@ -985,6 +1016,12 @@ fn render_menu_bar(ui: &mut egui::Ui, state: &mut State) {
             if ui.button("Импорт…").clicked() {
                 do_import(state);
             }
+            if ui.button("Импорт INPX…").clicked() {
+                if let Some(p) = pick_open_file("Импорт INPX", "lib.rus.ec INPX (*.inpx)", &["inpx"]) {
+                    state.import_inpx_file(&p.to_string_lossy());
+                }
+                ui.close_menu();
+            }
             if ui.button("Удалить книгу").clicked() {
                 state.delete_selected_book();
             }
@@ -1011,6 +1048,42 @@ fn render_menu_bar(ui: &mut egui::Ui, state: &mut State) {
             }
             if ui.button("Ремонт базы").clicked() {
                 state.repair_collection();
+                ui.close_menu();
+            }
+            if ui.button("Экспорт в INPX…").clicked() {
+                let default = format!(
+                    "{}.inpx",
+                    state
+                        .db_path
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "collection".into())
+                );
+                if let Some(p) = pick_save_file("Экспорт в INPX", "lib.rus.ec INPX (*.inpx)", &["inpx"], &default) {
+                    state.export_inpx_file(&p.to_string_lossy());
+                }
+                ui.close_menu();
+            }
+            ui.separator();
+            if ui.button("Импорт пользовательских данных…").clicked() {
+                if let Some(p) = pick_open_file(
+                    "Импорт пользовательских данных",
+                    "MyHomeLib user data (*.mhl;*.xml)",
+                    &["mhl", "xml"],
+                ) {
+                    state.import_user_data(&p.to_string_lossy());
+                }
+                ui.close_menu();
+            }
+            if ui.button("Экспорт пользовательских данных…").clicked() {
+                if let Some(p) = pick_save_file(
+                    "Экспорт пользовательских данных",
+                    "MyHomeLib user data (*.mhl;*.xml)",
+                    &["mhl", "xml"],
+                    "user_data.mhl",
+                ) {
+                    state.export_user_data(&p.to_string_lossy());
+                }
                 ui.close_menu();
             }
             ui.separator();
