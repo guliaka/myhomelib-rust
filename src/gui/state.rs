@@ -11,6 +11,7 @@ use crate::import::{Importer, ImportReport};
 use crate::librusec::catalog::{Catalog, CatalogBook};
 use crate::librusec::queue::DownloadQueue;
 use crate::settings::Settings;
+use crate::systemdb::{CollectionInfo, SystemDb};
 
 /// Which tree node is selected in the left panel.
 #[derive(Debug, Clone, PartialEq)]
@@ -165,6 +166,38 @@ pub struct State {
     pub lib_pass: String,
     pub lib_url: String,
     pub lib_script: String,
+    // -- Multi-collection management (system DB registry + dialogs) ---------------------------
+    /// System-DB handle (`None` in headless tests / when no registry is attached).
+    pub system: Option<SystemDb>,
+    /// The collection-manager dialog (the original's `frm_bases`).
+    pub show_collections: bool,
+    /// Registry rows shown in the manager dialog.
+    pub collection_rows: Vec<CollectionInfo>,
+    /// Last collection-management error, shown in the manager dialog.
+    pub collection_error: String,
+    /// Pending delete confirmation (collection id), plus whether to also purge files.
+    pub confirm_delete: Option<(i64, bool)>,
+    /// The new-collection wizard dialog (the original's NCW).
+    pub show_wizard: bool,
+    /// Wizard editor buffers (name / db file / root folder / notes / type).
+    pub wizard: WizardData,
+    /// The collection-properties dialog (the original's collection properties page).
+    pub show_properties: bool,
+    /// Editing copy of the current collection's registry entry (`None` = not registered).
+    pub props: Option<CollectionInfo>,
+}
+
+/// Editor buffers for the new-collection wizard. Mirrors the original wizard's
+/// name-and-location + file-types + finish steps; the genre source is always the built-in tree
+/// (the original's custom-genre-file and INPX-download steps are follow-ups).
+#[derive(Debug, Clone, Default)]
+pub struct WizardData {
+    pub name: String,
+    pub db_file: String,
+    pub root_folder: String,
+    pub notes: String,
+    /// `true` = online (Librusec) collection, `false` = local FB2/FBD.
+    pub online: bool,
 }
 
 impl State {
@@ -212,6 +245,15 @@ impl State {
             lib_pass,
             lib_url,
             lib_script,
+            system: None,
+            show_collections: false,
+            collection_rows: Vec::new(),
+            collection_error: String::new(),
+            confirm_delete: None,
+            show_wizard: false,
+            wizard: WizardData::default(),
+            show_properties: false,
+            props: None,
         };
         s.reload();
         s
@@ -512,6 +554,231 @@ impl State {
             }
         });
         self.status = "Searching online…".into();
+    }
+
+    // -- Multi-collection management -----------------------------------------
+
+    /// Attach the system-DB registry (the app runner does this on startup).
+    pub fn attach_system(&mut self, system: SystemDb) {
+        self.system = Some(system);
+    }
+
+    /// Re-read the registry rows for the manager dialog.
+    pub fn refresh_collections(&mut self) {
+        if let Some(sys) = self.system.as_ref() {
+            match sys.list() {
+                Ok(rows) => {
+                    self.collection_rows = rows;
+                    self.collection_error.clear();
+                }
+                Err(e) => self.collection_error = e.to_string(),
+            }
+        }
+    }
+
+    /// Open the collection-manager dialog (`Коллекция → Выбрать коллекцию…`).
+    pub fn open_collections(&mut self) {
+        self.refresh_collections();
+        self.show_collections = true;
+    }
+
+    /// Replace the open collection with another registered one (`db_file_name`), or just open a
+    /// path directly. Resets every cached view (trees, window, genres, selection, settings) so the
+    /// whole UI reflects the new collection — the original re-creates its main form; we swap in place.
+    pub fn switch_collection(&mut self, db_file: &str) {
+        match Db::open(db_file) {
+            Ok(db) => {
+                self.db = db;
+                self.db_path = PathBuf::from(db_file);
+                self.settings = Settings::load(&self.db_path);
+                self.selection = Selection::All;
+                self.filters = SearchFilters::default();
+                self.selected_book_id = None;
+                self.tab = self.settings.active_tab().min(TABS.len() - 1);
+                self.tree_built = [false; 6];
+                self.win_key = None;
+                self.win_books.clear();
+                self.genre_win_key = None;
+                self.win_genres.clear();
+                self.reload();
+                let name = self
+                    .collection_rows
+                    .iter()
+                    .find(|c| c.db_file_name == db_file)
+                    .map(|c| c.name.clone())
+                    .unwrap_or_else(|| db_file.to_string());
+                self.status = format!("Collection “{name}” opened");
+            }
+            Err(e) => self.status = format!("open {db_file} failed: {e}"),
+        }
+    }
+
+    /// Finish the new-collection wizard: create the collection file, register it, and open it.
+    pub fn create_collection(&mut self) {
+        let w = &self.wizard;
+        let name = w.name.trim().to_string();
+        let db_file = w.db_file.trim().to_string();
+        if name.is_empty() || db_file.is_empty() {
+            self.collection_error = "Укажите имя и файл базы коллекции".into();
+            return;
+        }
+        // Create the collection file (schema + built-in genres) — matches the original wizard,
+        // which also creates the DB before registering it.
+        if let Err(e) = Db::open(&db_file) {
+            self.collection_error = format!("не удалось создать базу: {e}");
+            return;
+        }
+        // The original's collection-type codes: local FB2 = CT_EXTERNAL_LOCAL_FB ($0001 0000),
+        // online FB2 = CT_EXTERNAL_ONLINE_FB ($0801 0000).
+        let code: i64 = if w.online { 0x0801_0000 } else { 0x0001_0000 };
+        let info = CollectionInfo {
+            name,
+            db_file_name: db_file.clone(),
+            root_folder: w.root_folder.trim().to_string(),
+            notes: w.notes.trim().to_string(),
+            code,
+            ..Default::default()
+        };
+        let sys = match self.system.as_ref() {
+            Some(s) => s,
+            None => {
+                self.collection_error = "системная база недоступна".into();
+                return;
+            }
+        };
+        if let Err(e) = sys.add(&info) {
+            self.collection_error = e.to_string();
+            return;
+        }
+        self.refresh_collections();
+        self.show_wizard = false;
+        self.switch_collection(&db_file);
+    }
+
+    /// Delete a collection from the registry (and optionally its files), after user confirmation.
+    /// The `confirm_delete` flag is set by the dialog; this is the actual action.
+    pub fn remove_collection(&mut self, id: i64, purge_files: bool) {
+        let file = self.collection_rows.iter().find(|c| c.id == id).map(|c| c.db_file_name.clone());
+        let current = self.db_path.to_string_lossy().to_string();
+        let purging_current = purge_files && file.as_deref() == Some(current.as_str());
+
+        // Windows can't delete an open file, so when purging the open collection, switch to another
+        // one FIRST (dropping the connection), and only then delete the row + files.
+        if purging_current {
+            let next = self
+                .collection_rows
+                .iter()
+                .find(|c| c.id != id && c.file_exists())
+                .map(|c| c.db_file_name.clone());
+            match next {
+                Some(next) => self.switch_collection(&next),
+                None => {
+                    self.collection_error =
+                        "Нельзя удалить файл открытой коллекции — сначала откройте другую".into();
+                    return;
+                }
+            }
+        }
+
+        let sys = match self.system.as_ref() {
+            Some(s) => s,
+            None => return,
+        };
+        if let Err(e) = sys.delete(id) {
+            self.collection_error = e.to_string();
+            return;
+        }
+        if purge_files {
+            if let Some(f) = &file {
+                if let Err(e) = SystemDb::purge_files(f) {
+                    self.collection_error = e.to_string();
+                }
+            }
+        }
+        self.confirm_delete = None;
+        self.refresh_collections();
+        // If the open collection's registry row is gone, fall back to the first remaining
+        // registered collection — the original closes its main form and re-opens another base.
+        let still_current = self
+            .collection_rows
+            .iter()
+            .any(|c| c.db_file_name == self.db_path.to_string_lossy());
+        if !still_current {
+            if let Some(next) = self
+                .collection_rows
+                .iter()
+                .find(|c| c.file_exists())
+                .map(|c| c.db_file_name.clone())
+            {
+                self.switch_collection(&next);
+            } else {
+                self.status = "Коллекция удалена (других коллекций нет)".into();
+            }
+        } else {
+            self.status = "Коллекция удалена из списка".into();
+        }
+    }
+
+    /// `Коллекция → Сжатие базы` — VACUUM, reporting the file-size delta.
+    pub fn compact_collection(&mut self) {
+        let before = self.db.file_size_bytes();
+        match self.db.compact() {
+            Ok(()) => {
+                let after = self.db.file_size_bytes();
+                let msg = match (before, after) {
+                    (Some(b), Some(a)) => format!("База сжата: {b} → {a} байт"),
+                    _ => "База сжата".to_string(),
+                };
+                self.status = msg;
+            }
+            Err(e) => self.status = format!("сжатие не удалось: {e}"),
+        }
+    }
+
+    /// `Коллекция → Ремонт базы` — integrity check + rebuild of the derived search columns.
+    pub fn repair_collection(&mut self) {
+        match self.db.repair() {
+            Ok(n) => self.status = format!("База проверена, восстановлено строк: {n}"),
+            Err(e) => self.status = format!("ремонт не удался: {e}"),
+        }
+    }
+
+    /// Open the properties dialog for the current collection (must be registered).
+    pub fn open_properties(&mut self) {
+        let current = self.db_path.to_string_lossy().to_string();
+        self.props = self
+            .system
+            .as_ref()
+            .and_then(|s| s.list().ok())
+            .and_then(|rows| rows.into_iter().find(|c| c.db_file_name == current));
+        if self.props.is_some() {
+            self.show_properties = true;
+        } else {
+            self.status = "Текущая коллекция не зарегистрирована в системной базе".into();
+        }
+    }
+
+    /// Save the edited properties back to the registry.
+    pub fn save_properties(&mut self) {
+        let props = match self.props.take() {
+            Some(p) => p,
+            None => return,
+        };
+        let sys = match self.system.as_ref() {
+            Some(s) => s,
+            None => return,
+        };
+        match sys.update(&props) {
+            Ok(()) => {
+                self.show_properties = false;
+                self.refresh_collections();
+                self.status = format!("Свойства “{}” сохранены", props.name);
+            }
+            Err(e) => {
+                self.props = Some(props);
+                self.collection_error = e.to_string();
+            }
+        }
     }
 }
 

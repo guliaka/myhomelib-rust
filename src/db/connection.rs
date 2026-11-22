@@ -82,11 +82,70 @@ impl Db {
         self.seed_builtin_genres()?;
         Ok(())
     }
+
+    // -- Collection maintenance (the original's acCollection* menu: compact / repair / verify) ----
+
+    /// On-disk size of the collection file, in bytes (for compact before/after reporting).
+    pub fn file_size_bytes(&self) -> Option<u64> {
+        std::fs::metadata(self.conn.path()?).ok().map(|m| m.len())
+    }
+
+    /// `VACUUM` — the original's `CompactDatabase` (rebuilds the file, reclaiming free pages).
+    /// Cannot run inside a transaction; safe here because the DAO never holds one across calls.
+    pub fn compact(&self) -> Result<()> {
+        self.conn.execute_batch("VACUUM")?;
+        Ok(())
+    }
+
+    /// `PRAGMA integrity_check` — returns `Ok` when the database is consistent, `Err` otherwise.
+    pub fn integrity_check(&self) -> Result<()> {
+        let result: String = self.conn.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
+        if result.eq_ignore_ascii_case("ok") {
+            Ok(())
+        } else {
+            Err(crate::error::AppError::msg(format!("integrity check failed: {result}")))
+        }
+    }
+
+    /// Repair a damaged collection. The original's `RepairDatabase` is a no-op for SQLite; here it
+    /// is actually useful: verify integrity, then recompute every derived `Search*` column (the
+    /// schema triggers only fire on writes, so a file whose search columns were corrupted — e.g. by
+    /// another tool writing with triggers disabled — silently loses search hits until rebuilt).
+    /// Returns the number of rows whose search columns were rewritten.
+    pub fn repair(&mut self) -> Result<u64> {
+        self.integrity_check()?;
+        self.conn.execute(
+            "UPDATE Books SET
+               SearchTitle      = MHL_UPPER(Title),
+               SearchLang       = MHL_UPPER(Lang),
+               SearchFolder     = MHL_UPPER(Folder),
+               SearchFileName   = MHL_UPPER(FileName),
+               SearchExt        = MHL_UPPER(Ext),
+               SearchKeyWords   = MHL_UPPER(KeyWords),
+               SearchAnnotation = MHL_UPPER(Annotation)",
+            [],
+        )?;
+        self.conn.execute(
+            "UPDATE Authors SET SearchName = MHL_FULLNAME(LastName, FirstName, MiddleName, 1)",
+            [],
+        )?;
+        self.conn.execute(
+            "UPDATE Series SET SearchSeriesTitle = MHL_UPPER(SeriesTitle)",
+            [],
+        )?;
+        // rows-changed isn't available for UPDATE on rusqlite's `execute`; report the row counts.
+        let n: i64 = self.conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM Books) + (SELECT COUNT(*) FROM Authors) + (SELECT COUNT(*) FROM Series)",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(n as u64)
+    }
 }
 
 /// Register the collation + pure UDFs (no shared state). Must run before DDL that references
-/// `MHL_SYSTEM_NOCASE`.
-fn register_mhl_affinities(conn: &Connection) {
+/// `MHL_SYSTEM_NOCASE`. Also used by the system DB (its schema declares the same collations).
+pub(crate) fn register_mhl_affinities(conn: &Connection) {
     // Unicode case-insensitive collation. SQLite's built-in NOCASE is ASCII-only; this handles the
     // Cyrillic identifiers the app deals with.
     conn.create_collation("MHL_SYSTEM_NOCASE", |a, b| a.to_lowercase().cmp(&b.to_lowercase()))

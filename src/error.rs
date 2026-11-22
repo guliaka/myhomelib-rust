@@ -30,3 +30,10 @@ pub enum AppError {
 }
 
 pub type Result<T> = std::result::Result<T, AppError>;
+
+impl AppError {
+    /// A human-readable message error (the catch-all `Other` variant, for dynamic strings).
+    pub fn msg(s: impl Into<String>) -> Self {
+        Self::Other(s.into())
+    }
+}

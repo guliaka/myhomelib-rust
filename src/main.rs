@@ -35,6 +35,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some("import") => cmd_import(&args[1..]),
         Some("genres") => cmd_genres(&args[1..]),
         Some("export") => cmd_export(&args[1..]),
+        Some("collections") => cmd_collections(&args[1..]),
+        Some("maintenance") => cmd_maintenance(&args[1..]),
         _ => {
             print_usage();
             Ok(())
@@ -199,6 +201,110 @@ fn cmd_export(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// `myhomelib collections <system-db> <subcmd> …` — manage the collection registry
+/// (list / add / remove), mirroring the GUI's collection manager.
+fn cmd_collections(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use myhomelib::systemdb::{CollectionInfo, SystemDb};
+    let path = args.first().ok_or("usage: myhomelib collections <system-db> list|add|remove …")?.clone();
+    let cmd = args.get(1).map(String::as_str).ok_or("usage: myhomelib collections <system-db> list|add|remove …")?;
+    let sys = SystemDb::open(&path)?;
+
+    match cmd {
+        "list" => {
+            let rows = sys.list()?;
+            if rows.is_empty() {
+                println!("(no collections registered)");
+            }
+            for c in &rows {
+                println!(
+                    "[{}] {}\n    db: {}{}\n    type: {}, created {}",
+                    c.id,
+                    c.name,
+                    c.db_file_name,
+                    if c.file_exists() { "" } else { "  (FILE MISSING)" },
+                    if c.is_online() { "online" } else { "local" },
+                    c.creation_date
+                );
+            }
+        }
+        "add" => {
+            // collections <sys> add <name> <db-file> [--root DIR] [--notes N] [--online]
+            let name = args.get(2).cloned().ok_or("missing <name>")?;
+            let db_file = args.get(3).cloned().ok_or("missing <db-file>")?;
+            let mut info = CollectionInfo {
+                name,
+                db_file_name: db_file.clone(),
+                ..Default::default()
+            };
+            let mut i = 4;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--root" => {
+                        i += 1;
+                        info.root_folder = args.get(i).cloned().unwrap_or_default();
+                    }
+                    "--notes" => {
+                        i += 1;
+                        info.notes = args.get(i).cloned().unwrap_or_default();
+                    }
+                    "--online" => info.code = 0x0801_0000,
+                    other => return Err(format!("unknown option {other}").into()),
+                }
+                i += 1;
+            }
+            // Create the collection file if it doesn't exist yet (the wizard's behavior).
+            myhomelib::db::Db::open(&info.db_file_name)?;
+            let id = sys.add(&info)?;
+            println!("registered collection #{id}: {} ({})", info.name, info.db_file_name);
+        }
+        "remove" => {
+            // collections <sys> remove <id> [--purge]
+            let id: i64 = args.get(2).ok_or("missing <id>")?.parse()?;
+            let purge = args.iter().any(|a| a == "--purge");
+            let file = sys.get(id)?.map(|c| c.db_file_name);
+            sys.delete(id)?;
+            if purge {
+                if let Some(f) = &file {
+                    SystemDb::purge_files(f)?;
+                    println!("removed collection #{id} and deleted {f}");
+                }
+            } else {
+                println!("removed collection #{id} from registry (files kept)");
+            }
+        }
+        other => return Err(format!("unknown collections subcommand {other}").into()),
+    }
+    Ok(())
+}
+
+/// `myhomelib maintenance <db-path> check|compact|repair` — collection upkeep (the GUI menu actions).
+fn cmd_maintenance(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let path = args.first().ok_or("usage: myhomelib maintenance <db-path> check|compact|repair")?;
+    let cmd = args.get(1).map(String::as_str).ok_or("missing subcommand: check|compact|repair")?;
+    let mut db = myhomelib::db::Db::open(path)?;
+    match cmd {
+        "check" => {
+            db.integrity_check()?;
+            println!("integrity check passed");
+        }
+        "compact" => {
+            let before = db.file_size_bytes();
+            db.compact()?;
+            println!(
+                "vacuumed: {} -> {} bytes",
+                before.unwrap_or(0),
+                db.file_size_bytes().unwrap_or(0)
+            );
+        }
+        "repair" => {
+            let n = db.repair()?;
+            println!("integrity ok, search columns rebuilt for {n} row(s)");
+        }
+        other => return Err(format!("unknown maintenance subcommand {other}").into()),
+    }
+    Ok(())
+}
+
 fn print_usage() {
     eprintln!(
         "myhomelib — data-layer + FB2/FBD CLI\n\
@@ -209,7 +315,9 @@ fn print_usage() {
          \x20 myhomelib stats   <db-path>\n\
          \x20 myhomelib import  <db-path> <dir> [--register-genres]\n\
          \x20 myhomelib genres  <db-path> [--seed | --file <path>]\n\
-         \x20 myhomelib export  <db-path> <book-id> <out.fb2>"
+         \x20 myhomelib export  <db-path> <book-id> <out.fb2>\n\
+         \x20 myhomelib collections <system-db> list | add <name> <db-file> [--root DIR] [--online] | remove <id> [--purge]\n\
+         \x20 myhomelib maintenance <db-path> check | compact | repair"
     );
 }
 

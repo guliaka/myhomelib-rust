@@ -20,6 +20,22 @@ impl MyHomeLibApp {
             icons: view::IconCache::default(),
         })
     }
+
+    /// Attach the collection registry (called by the GUI entry point after opening the system DB).
+    pub fn attach_system(&mut self, system: crate::systemdb::SystemDb) {
+        self.state.attach_system(system);
+    }
+
+    /// Re-read the registry rows (so the manager dialog is fresh at startup).
+    pub fn refresh_collections(&mut self) {
+        self.state.refresh_collections();
+    }
+
+    /// Open the new-collection wizard (first launch with an empty registry).
+    pub fn open_wizard(&mut self) {
+        self.state.wizard = state::WizardData::default();
+        self.state.show_wizard = true;
+    }
 }
 
 impl eframe::App for MyHomeLibApp {

@@ -179,6 +179,42 @@ original's view/collection toggles and show their tooltip until ported. Headless
 placeholder per icon since `image` is gui-only. *Known delta:* egui draws flat widgets, so the toolbar/menu can't
 be pixel-identical to beveled native Win32 controls — this is the closest achievable in pure egui.
 
+### D16 — Multi-collection management: system DB registry, wizard, repair, compact, delete, properties
+The original keeps a **system database** (`unit_SystemDatabase_SQLite.pas`, `CreateSystemDB_SQLite.sql`) — a
+separate SQLite file with a `Bases` row per collection plus cross-collection `Books`/`Groups`/BookGroups`
+user-data tables. We port the schema verbatim (`schema/create_system_db.sql`) and open/create it through
+`SystemDb` (`src/systemdb.rs`), so an existing original system DB opens unchanged and vice versa. Default
+location: `$MYHOMELIB_SYSTEM_DB`, else `MyHomeLib.system.db` next to the executable.
+
+- **Registry CRUD** — `CollectionInfo` mirrors `TCollectionInfo` (name, root folder, db file, notes, Librusec
+  user/password/URL/script, `Code` = the original's `COLLECTION_TYPE` bitmask, creation date). `BaseName` is
+  unique; deleting a row cascades its user-data rows via the schema's `TRBases_BD` trigger.
+- **New-collection wizard** — the original's NCW condensed: name/db-file/root-folder/notes + local/online
+  type. Genre source is always the built-in tree (the NCW's custom-genre-file and INPX-download steps are
+  follow-ups). Collection-type codes match: local = `CT_EXTERNAL_LOCAL_FB` ($0001_0000), online =
+  `CT_EXTERNAL_ONLINE_FB` ($0801_0000).
+- **Switch in place** — the original re-creates its main form; `State::switch_collection` swaps the `Db`,
+  reloads `<db>.ini` settings, and resets every cache (trees, list window, genre window, selection), so the
+  whole UI reflects the new collection.
+- **Delete** — registry row only by default; optional purge of the `.db` + `.ini` files behind a confirmation.
+  Windows can't delete an open file, so purging the *open* collection switches to another registered one
+  first (and refuses if none exists).
+- **Repair** — the original's `RepairDatabase` is a no-op for SQLite; ours is useful: `PRAGMA integrity_check`
+  then a rebuild of every derived `Search*` column (the schema triggers only fire on writes, so a file whose
+  search columns were corrupted by another tool silently loses search hits until rebuilt).
+- **Compact** — `VACUUM`, reported with before/after file size (the original's `CompactDatabase`).
+- **Properties** — the original's collection-properties dialog: name, root folder, notes, Librusec
+  URL/user/password, creation date + type (read-only).
+- **CLI** — `myhomelib collections <sys-db> list|add|remove [--purge]` and
+  `myhomelib maintenance <db> check|compact|repair` mirror the GUI actions for scripts/headless use.
+- **First launch** — `myhomelib-gui` with no argument opens the first registered collection whose file
+  exists (the original's `FindFirstExistingCollectionID`); with an empty registry it opens a fresh
+  unregistered collection and pops the wizard.
+
+*Known delta:* the system DB's cross-collection user-data tables (rate/progress/groups keyed
+`(BookID, DatabaseID)`) are created for schema fidelity but not yet written — the groups feature isn't
+ported, and book ratings are per-collection until it is.
+
 ---
 
 ## Faithful behavior recovered from the original source

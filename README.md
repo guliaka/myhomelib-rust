@@ -18,6 +18,7 @@ src/
   import.rs # headless catalog import (scan dir, extract metadata, dedupe by source file)
   export.rs # headless metadata export (rebuild an FB2 from a stored book)
   settings.rs# user settings: minimal ordered INI store at `<db>.ini` (readers, tab, window size, Librusec)
+  systemdb.rs# system DB: registry of collections (wizard, properties, delete) + maintenance (repair, vacuum)
   librusec/ # Librusec online client: connection-script engine, INPX catalog parser, download queue
   gui/      # egui GUI: state (pure Rust) + view (egui) + eframe window runner (`gui` feature)
   error.rs  # AppError
@@ -59,6 +60,19 @@ cargo run -- stats   demo.db                    # collection counts
 cargo run -- import  demo.db /path/to/fb2-dir [--register-genres]   # scan dir, extract + dedupe
 cargo run -- genres  demo.db [--seed | --file list.txt]             # list / re-seed / replace genre catalog
 cargo run -- export  demo.db <book-id> out.fb2  # rebuild a book's metadata as FB2
+```
+
+## Multi-collection management
+A separate **system DB** (`MyHomeLib.system.db` next to the executable, or `$MYHOMELIB_SYSTEM_DB`) registers
+every collection — schema-identical to the original app's system database, so the two interoperate. The GUI's
+«Коллекция» menu offers the original's actions: choose/create/delete collections (new-collection wizard,
+properties, VACUUM compact, repair = integrity check + search-column rebuild). CLI equivalents:
+
+```sh
+cargo run -- collections sys.db list
+cargo run -- collections sys.db add "Домашняя" home.db --root /books --online
+cargo run -- collections sys.db remove 2 --purge
+cargo run -- maintenance home.db check|compact|repair
 ```
 
 ## GUI (Phases 4–6)

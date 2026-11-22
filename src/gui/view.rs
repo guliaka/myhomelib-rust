@@ -12,7 +12,7 @@ use crate::core::Book;
 
 use crate::librusec::queue::ItemStatus;
 
-use super::state::{author_display, Selection, State, TABS};
+use super::state::{author_display, Selection, State, WizardData, TABS};
 
 /// Import action for the top-bar button. In the windowed build it opens a native folder picker and
 /// imports everything under it; in headless (non-gui) builds it only reports — there's no display to
@@ -402,6 +402,200 @@ pub fn render(ctx: &egui::Context, state: &mut State, icons: &mut IconCache) {
         state.show_settings = open;
     }
 
+    // Collection manager — the original's frm_bases: the registry list with open/remove.
+    if state.show_collections {
+        let mut open = true;
+        let mut close_after = false;
+        Window::new("Выбрать коллекцию")
+            .open(&mut open)
+            .min_size(egui::vec2(480.0, 260.0))
+            .show(ctx, |ui| {
+                if !state.collection_error.is_empty() {
+                    ui.label(RichText::new(&state.collection_error).color(Color32::RED));
+                    ui.separator();
+                }
+                let rows = state.collection_rows.clone();
+                if rows.is_empty() {
+                    ui.label(RichText::new("(нет зарегистрированных коллекций)").weak());
+                } else {
+                    egui::Grid::new("collections_grid").striped(true).show(ui, |ui| {
+                        ui.strong("Имя");
+                        ui.strong("Файл базы");
+                        ui.strong("Создана");
+                        ui.strong("Тип");
+                        ui.end_row();
+                        for c in rows.iter() {
+                            let is_current = c.db_file_name == state.db_path.to_string_lossy();
+                            let name = if is_current {
+                                RichText::new(format!("{} ✓", c.name)).strong()
+                            } else {
+                                RichText::new(&c.name)
+                            };
+                            if ui
+                                .button(
+                                    name
+                                        .color(if c.file_exists() { Color32::BLACK } else { Color32::RED }),
+                                )
+                                .clicked()
+                            {
+                                if c.file_exists() {
+                                    state.switch_collection(&c.db_file_name);
+                                    close_after = true;
+                                } else {
+                                    state.collection_error =
+                                        format!("файл не найден: {}", c.db_file_name);
+                                }
+                            }
+                            ui.monospace(&c.db_file_name);
+                            ui.monospace(&c.creation_date);
+                            ui.label(if c.is_online() { "онлайн" } else { "локальная" });
+                            if ui.button("Удалить").clicked() {
+                                state.confirm_delete = Some((c.id, false));
+                            }
+                            ui.end_row();
+                        }
+                    });
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Новая коллекция…").clicked() {
+                        state.wizard = WizardData::default();
+                        state.show_wizard = true;
+                    }
+                    if ui.button("Обновить").clicked() {
+                        state.refresh_collections();
+                    }
+                });
+            });
+        state.show_collections = open && !close_after;
+    }
+
+    // Delete confirmation (matches the original's confirmation before removing a collection).
+    if let Some((id, purge)) = state.confirm_delete {
+        let mut confirm = false;
+        let mut purge = purge;
+        let name = state
+            .collection_rows
+            .iter()
+            .find(|c| c.id == id)
+            .map(|c| c.name.clone())
+            .unwrap_or_default();
+        Window::new("Удаление коллекции")
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(format!("Удалить коллекцию “{name}” из списка?"));
+                ui.checkbox(&mut purge, "Также удалить файлы базы (.db и .ini)");
+                ui.horizontal(|ui| {
+                    if ui.button("Удалить").clicked() {
+                        confirm = true;
+                    }
+                    if ui.button("Отмена").clicked() {
+                        state.confirm_delete = None;
+                    }
+                });
+            });
+        if confirm {
+            state.remove_collection(id, purge);
+        }
+    }
+
+    // New-collection wizard — the original's NCW condensed: name/location + type + create.
+    if state.show_wizard {
+        let mut open = true;
+        Window::new("Новая коллекция")
+            .open(&mut open)
+            .min_size(egui::vec2(420.0, 280.0))
+            .show(ctx, |ui| {
+                egui::Grid::new("wizard_grid").show(ui, |ui| {
+                    ui.label("Имя коллекции:");
+                    ui.add(TextEdit::singleline(&mut state.wizard.name).desired_width(280.));
+                    ui.end_row();
+                    ui.label("Файл базы:");
+                    ui.add(
+                        TextEdit::singleline(&mut state.wizard.db_file)
+                            .desired_width(280.)
+                            .hint_text("например C:\\Books\\mylib.db"),
+                    );
+                    ui.end_row();
+                    ui.label("Папка с книгами:");
+                    ui.add(
+                        TextEdit::singleline(&mut state.wizard.root_folder)
+                            .desired_width(280.)
+                            .hint_text("(необязательно)"),
+                    );
+                    ui.end_row();
+                    ui.label("Заметки:");
+                    ui.add(TextEdit::singleline(&mut state.wizard.notes).desired_width(280.));
+                    ui.end_row();
+                });
+                ui.separator();
+                ui.checkbox(&mut state.wizard.online, "Онлайн-коллекция (Librusec, скачивание)");
+                ui.label(RichText::new("Жанровый каталог: встроенный список FB2-жанров").weak());
+                if !state.collection_error.is_empty() {
+                    ui.label(RichText::new(&state.collection_error).color(Color32::RED));
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Создать").clicked() {
+                        state.create_collection();
+                    }
+                    if ui.button("Отмена").clicked() {
+                        state.show_wizard = false;
+                        state.collection_error.clear();
+                    }
+                });
+            });
+        state.show_wizard = open;
+    }
+
+    // Collection properties — the original's collection-properties dialog (registry fields).
+    if state.show_properties {
+        let mut open = true;
+        let has_props = state.props.is_some();
+        Window::new("Свойства коллекции")
+            .open(&mut open)
+            .min_size(egui::vec2(420.0, 300.0))
+            .show(ctx, |ui| {
+                if let Some(p) = state.props.as_mut() {
+                    egui::Grid::new("props_grid").show(ui, |ui| {
+                        ui.label("Имя:");
+                        ui.add(TextEdit::singleline(&mut p.name).desired_width(280.));
+                        ui.end_row();
+                        ui.label("Файл базы:");
+                        ui.monospace(&p.db_file_name);
+                        ui.end_row();
+                        ui.label("Папка с книгами:");
+                        ui.add(TextEdit::singleline(&mut p.root_folder).desired_width(280.));
+                        ui.end_row();
+                        ui.label("Заметки:");
+                        ui.add(TextEdit::singleline(&mut p.notes).desired_width(280.));
+                        ui.end_row();
+                        ui.label("Создана:");
+                        ui.monospace(&p.creation_date);
+                        ui.end_row();
+                        ui.label("Librusec:");
+                        ui.add(TextEdit::singleline(&mut p.url).desired_width(280.).hint_text("URL"));
+                        ui.end_row();
+                        ui.label("");
+                        ui.add(TextEdit::singleline(&mut p.lib_user).desired_width(130.).hint_text("логин"));
+                        ui.add(TextEdit::singleline(&mut p.lib_password).desired_width(130.).hint_text("пароль"));
+                        ui.end_row();
+                    });
+                    ui.separator();
+                    ui.label(format!("Тип: {}", if p.is_online() { "онлайн" } else { "локальная" }));
+                    ui.horizontal(|ui| {
+                        if ui.button("Сохранить").clicked() {
+                            state.save_properties();
+                        }
+                    });
+                }
+                if !state.collection_error.is_empty() {
+                    ui.label(RichText::new(&state.collection_error).color(Color32::RED));
+                }
+            });
+        state.show_properties = open && has_props;
+    }
+
     // Online (Librusec) panel: connection config + search + results + download queue.
     state.poll_online();
     if state.show_online {
@@ -758,6 +952,30 @@ fn render_menu_bar(ui: &mut egui::Ui, state: &mut State) {
             }
         });
         ui.menu_button("Коллекция", |ui| {
+            // The original's acCollection* actions: select/create/delete/properties/compact/repair.
+            if ui.button("Выбрать коллекцию…").clicked() {
+                state.open_collections();
+                ui.close_menu();
+            }
+            if ui.button("Новая коллекция…").clicked() {
+                state.wizard = WizardData::default();
+                state.show_wizard = true;
+                ui.close_menu();
+            }
+            ui.separator();
+            if ui.button("Свойства…").clicked() {
+                state.open_properties();
+                ui.close_menu();
+            }
+            if ui.button("Сжатие базы").clicked() {
+                state.compact_collection();
+                ui.close_menu();
+            }
+            if ui.button("Ремонт базы").clicked() {
+                state.repair_collection();
+                ui.close_menu();
+            }
+            ui.separator();
             if ui.button("Статистика").clicked() {
                 state.show_stats = true;
             }

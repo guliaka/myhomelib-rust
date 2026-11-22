@@ -13,5 +13,6 @@ pub mod gui;
 pub mod import;
 pub mod librusec;
 pub mod settings;
+pub mod systemdb;
 
 pub use db::{BookQuery, CollectionStats, Db};
