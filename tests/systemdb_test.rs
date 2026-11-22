@@ -234,3 +234,106 @@ fn purge_files_removes_db_and_ini() {
     assert!(!db_path.exists());
     assert!(!ini.exists());
 }
+
+#[test]
+fn group_editor_flow() {
+    use myhomelib::core::Book;
+    use myhomelib::gui::state::{GroupEditMode, Selection, State, TABS};
+
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join("coll.db");
+    let mut db = Db::open(&db_path).unwrap();
+    let a = db.upsert_author("Толстой", Some("Лев"), None).unwrap();
+    db.insert_book(
+        &Book {
+            book_id: 0,
+            lib_id: "lib-1".into(),
+            title: "Война и мир".into(),
+            series_id: None,
+            seq_number: None,
+            update_date: "2026-11-21 12:00:00".into(),
+            lib_rate: 0,
+            lang: Some("ru".into()),
+            folder: None,
+            file_name: "voina.fb2".into(),
+            inside_no: 0,
+            ext: Some("fb2".into()),
+            book_size: Some(1),
+            is_local: true,
+            is_deleted: false,
+            key_words: None,
+            rate: 0,
+            progress: 0,
+            annotation: None,
+            review: None,
+        },
+        &[a],
+        &[],
+    )
+    .unwrap();
+
+    let sys = SystemDb::open(tmp.path().join("s.db")).unwrap();
+    sys.add(&info("Библиотека", &db_path.to_string_lossy())).unwrap();
+    let mut state = State::new(Db::open(&db_path).unwrap(), db_path.to_string_lossy().to_string());
+    state.attach_system(sys);
+
+    // attach_system seeds the original's protected defaults.
+    let names: Vec<String> = state.groups_cache.iter().map(|g| g.1.clone()).collect();
+    assert!(names.contains(&"Избранное".to_string()));
+    assert!(names.contains(&"К прочтению".to_string()));
+
+    // Create a group through the editor dialog flow.
+    state.open_group_edit(GroupEditMode::Create);
+    state.group_edit.as_mut().unwrap().1 = "Прочитать летом".into();
+    state.apply_group_edit();
+    assert!(state.group_edit.is_none());
+    assert_eq!(state.groups_cache.len(), 3);
+
+    // Add the selected book to it (the «Добавить в группу» picker action).
+    let gid = state.groups_cache.iter().find(|g| g.1 == "Прочитать летом").unwrap().0;
+    state.select_book_id(1);
+    state.add_selected_to_group(gid);
+    state.refresh_groups_cache();
+    let entry = state.groups_cache.iter().find(|g| g.0 == gid).unwrap();
+    assert_eq!(entry.2, 1);
+
+    // The Группы tab shows the group with its count; selecting it lists the member book.
+    state.set_tab(TABS.iter().position(|t| *t == "Группы").unwrap());
+    let nodes = state.tree_nodes();
+    let node = nodes.iter().find(|n| matches!(n.selection, Selection::Group(g) if g == gid)).unwrap();
+    assert_eq!(node.count, 1);
+    state.select(Selection::Group(gid));
+    assert_eq!(state.list_total, 1);
+    let books = state.books_range(0, 10);
+    assert_eq!(books.len(), 1);
+    assert_eq!(books[0].title, "Война и мир");
+
+    // Duplicate add is a no-op.
+    state.add_selected_to_group(gid);
+    assert_eq!(state.list_total, 1);
+
+    // Remove from group: book disappears from the group view.
+    state.remove_selected_from_group();
+    assert_eq!(state.list_total, 0);
+
+    // Re-add, then clear the group (books stay in the library).
+    state.add_selected_to_group(gid);
+    state.delete_or_clear_group(gid, true);
+    assert_eq!(state.list_total, 0); // cleared group stays selected, now empty
+    assert_eq!(state.db.count_books(&Default::default()).unwrap(), 1);
+
+    // Rename.
+    state.open_group_edit(GroupEditMode::Rename(gid));
+    state.group_edit.as_mut().unwrap().1 = "Архив".into();
+    state.apply_group_edit();
+    state.refresh_groups_cache();
+    assert!(state.groups_cache.iter().any(|g| g.1 == "Архив"));
+
+    // Delete the user group; protected «Избранное» refuses deletion.
+    state.delete_or_clear_group(gid, false);
+    assert!(state.groups_cache.iter().all(|g| g.0 != gid));
+    let fav = state.groups_cache.iter().find(|g| g.1 == "Избранное").unwrap().0;
+    state.delete_or_clear_group(fav, false);
+    assert!(state.groups_cache.iter().any(|g| g.0 == fav));
+    assert!(state.status.contains("нельзя удалить"));
+}

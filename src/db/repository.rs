@@ -405,6 +405,34 @@ impl Db {
         Ok(out)
     }
 
+    /// Fetch books by exact id list (used by the groups view: membership lives in the system DB,
+    /// the book rows in the collection DB). Returns in the order of `ids`, skipping unknown ids.
+    pub fn list_books_by_ids(&self, ids: &[i64]) -> Result<Vec<Book>> {
+        let mut out = Vec::with_capacity(ids.len());
+        if ids.is_empty() {
+            return Ok(out);
+        }
+        let ph: Vec<String> = (1..=ids.len()).map(|i| format!("?{i}")).collect();
+        let sql = format!(
+            "SELECT {} FROM Books WHERE BookID IN ({})",
+            book_cols(""),
+            ph.join(", ")
+        );
+        let mut by_id = HashMap::new();
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(ids.iter().copied()), row_to_book)?;
+        for row in rows {
+            let b: Book = row?;
+            by_id.insert(b.book_id, b);
+        }
+        for id in ids {
+            if let Some(b) = by_id.remove(id) {
+                out.push(b);
+            }
+        }
+        Ok(out)
+    }
+
     /// Paginated search across the `Search*` columns. See [`BookQuery`].
     pub fn search_books(&self, q: &BookQuery, limit: i64, offset: i64) -> Result<Vec<Book>> {
         let (sql, params) = build_search_sql(q, limit, offset)?;

@@ -12,7 +12,7 @@ use crate::core::Book;
 
 use crate::librusec::queue::ItemStatus;
 
-use super::state::{author_display, Selection, State, WizardData, TABS};
+use super::state::{author_display, GroupEditMode, Selection, State, WizardData, TABS};
 
 /// Import action for the top-bar button. In the windowed build it opens a native folder picker and
 /// imports everything under it; in headless (non-gui) builds it only reports — there's no display to
@@ -665,6 +665,109 @@ pub fn render(ctx: &egui::Context, state: &mut State, icons: &mut IconCache) {
         state.show_properties = open && has_props;
     }
 
+    // Group name prompt (create / rename — the original's frm_EditGroup).
+    if state.group_edit.is_some() {
+        let mut open = true;
+        Window::new("Группа")
+            .open(&mut open)
+            .min_size(egui::vec2(320.0, 120.0))
+            .show(ctx, |ui| {
+                let mut apply = false;
+                let mut cancel = false;
+                if let Some((_, text)) = state.group_edit.as_mut() {
+                    ui.label("Имя группы:");
+                    ui.add(TextEdit::singleline(text).desired_width(240.));
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui.button("ОК").clicked() {
+                            apply = true;
+                        }
+                        if ui.button("Отмена").clicked() {
+                            cancel = true;
+                        }
+                    });
+                }
+                if apply {
+                    state.apply_group_edit();
+                }
+                if cancel {
+                    state.group_edit = None;
+                }
+            });
+        if !open {
+            state.group_edit = None;
+        }
+    }
+
+    // Group delete / clear confirmation.
+    if let Some((id, name, clear_only)) = state.group_delete_confirm.clone() {
+        let mut confirm = false;
+        let mut confirm_clear = false;
+        Window::new("Группа")
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                if clear_only {
+                    ui.label(format!("Очистить группу «{name}»? (книги останутся в библиотеке)"));
+                    ui.horizontal(|ui| {
+                        if ui.button("Очистить").clicked() {
+                            confirm_clear = true;
+                        }
+                        if ui.button("Отмена").clicked() {
+                            state.group_delete_confirm = None;
+                        }
+                    });
+                } else {
+                    ui.label(format!("Удалить группу «{name}»?"));
+                    ui.label(RichText::new("Книги останутся в библиотеке").weak());
+                    ui.horizontal(|ui| {
+                        if ui.button("Удалить").clicked() {
+                            confirm = true;
+                        }
+                        if ui.button("Отмена").clicked() {
+                            state.group_delete_confirm = None;
+                        }
+                    });
+                }
+            });
+        if confirm || confirm_clear {
+            state.delete_or_clear_group(id, clear_only || confirm_clear);
+        }
+    }
+
+    // Add-selected-book-to-group picker (the original's context «Добавить в группу» submenu).
+    if state.show_group_picker {
+        let mut open = true;
+        Window::new("Добавить в группу")
+            .open(&mut open)
+            .min_size(egui::vec2(280.0, 200.0))
+            .show(ctx, |ui| {
+                let book = state
+                    .selected_book_id
+                    .and_then(|id| state.db.get_book(id).ok())
+                    .flatten();
+                match book {
+                    Some(b) => {
+                        ui.label(format!("«{}» →", b.title));
+                    }
+                    None => {
+                        ui.label(RichText::new("(сначала выберите книгу в списке)").weak());
+                    }
+                }
+                ui.separator();
+                let rows = state.groups_cache.clone();
+                if rows.is_empty() {
+                    ui.label(RichText::new("(нет групп — создайте в меню Группа)").weak());
+                } else {
+                    for (gid, name, count) in rows {
+                        if ui.button(format!("{name}  ({count})")).clicked() {
+                            state.add_selected_to_group(gid);
+                        }
+                    }
+                }
+            });
+        state.show_group_picker = open;
+    }
+
     // Online (Librusec) panel: connection config + search + results + download queue.
     state.poll_online();
     if state.show_online {
@@ -1025,6 +1128,18 @@ fn render_menu_bar(ui: &mut egui::Ui, state: &mut State) {
             if ui.button("Удалить книгу").clicked() {
                 state.delete_selected_book();
             }
+            ui.separator();
+            // The original's context menu: «Добавить в группу» (a group list) /
+            // «Удалить из группы» (removes from the open group).
+            if ui.button("Добавить в группу…").clicked() {
+                state.refresh_groups_cache();
+                state.show_group_picker = true;
+                ui.close_menu();
+            }
+            if ui.button("Удалить из группы").clicked() {
+                state.remove_selected_from_group();
+                ui.close_menu();
+            }
         });
         ui.menu_button("Коллекция", |ui| {
             // The original's acCollection* actions: select/create/delete/properties/compact/repair.
@@ -1095,6 +1210,39 @@ fn render_menu_bar(ui: &mut egui::Ui, state: &mut State) {
             }
         });
         ui.menu_button("Группа", |ui| {
+            // The original's Группа menu: create / rename / delete / clear, acting on the group
+            // selected in the Группы tab's tree.
+            if ui.button("Создать группу…").clicked() {
+                state.open_group_edit(GroupEditMode::Create);
+                ui.close_menu();
+            }
+            if let Selection::Group(id) = state.selection {
+                if ui.button("Переименовать группу…").clicked() {
+                    state.open_group_edit(GroupEditMode::Rename(id));
+                    ui.close_menu();
+                }
+                if ui.button("Удалить группу…").clicked() {
+                    let name = state
+                        .groups_cache
+                        .iter()
+                        .find(|g| g.0 == id)
+                        .map(|g| g.1.clone())
+                        .unwrap_or_default();
+                    state.group_delete_confirm = Some((id, name, false));
+                    ui.close_menu();
+                }
+                if ui.button("Очистить группу").clicked() {
+                    let name = state
+                        .groups_cache
+                        .iter()
+                        .find(|g| g.0 == id)
+                        .map(|g| g.1.clone())
+                        .unwrap_or_default();
+                    state.group_delete_confirm = Some((id, name, true));
+                    ui.close_menu();
+                }
+            }
+            ui.separator();
             if ui.button("Обновить").clicked() {
                 state.reload();
             }

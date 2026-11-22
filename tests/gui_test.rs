@@ -116,12 +116,11 @@ fn navigation_by_author_genre_series_folder() {
     state.select(Selection::Genre("prose_classic".into()));
     assert_eq!(state.list_total, 3);
 
-    // Groups/Folders tab (4): root (1) + "russian" (2).
+    // Groups tab (4): real system-DB groups — without a registry attached there are none
+    // (the original's groups view needs the system DB too).
     state.set_tab(4);
-    let folders = state.tree_nodes();
-    assert_eq!(folders.len(), 2);
-    state.select(Selection::Folder(Some("russian".into())));
-    assert_eq!(titles(&mut state), vec!["Анна Каренина", "Преступление и наказание"]);
+    let groups = state.tree_nodes();
+    assert!(groups.is_empty());
 
     // The other author's node resolves correctly too.
     state.select(Selection::Author(dostoevsky));

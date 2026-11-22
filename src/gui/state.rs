@@ -23,6 +23,8 @@ pub enum Selection {
     Series(i64),
     /// A folder; `None` = the collection root.
     Folder(Option<String>),
+    /// A reading group (system-DB `GroupID`).
+    Group(i64),
 }
 
 impl Selection {
@@ -34,15 +36,18 @@ impl Selection {
             Selection::Series(id) => format!("Series #{id}"),
             Selection::Folder(None) => "(root folder)".to_string(),
             Selection::Folder(Some(f)) => f.clone(),
+            Selection::Group(id) => format!("Group #{id}"),
         }
     }
 }
 
-/// What the book list currently pages through: a search (flat [`BookQuery`]) or a tree-node scope.
+/// What the book list currently pages through: a search (flat [`BookQuery`]), a tree-node scope,
+/// or a reading group's member books (ids resolved from the system DB).
 #[derive(Debug, Clone, PartialEq)]
 enum ListSource {
     Search(BookQuery),
     Scope(BookScope),
+    Group(i64),
 }
 
 /// Map a GUI [`Selection`] to its DAO [`BookScope`].
@@ -54,6 +59,8 @@ impl From<Selection> for BookScope {
             Selection::Genre(code) => BookScope::Genre(code),
             Selection::Series(id) => BookScope::Series(id),
             Selection::Folder(f) => BookScope::Folder(f),
+            // Group lists page over system-DB membership ids (ListSource::Group), never this scope.
+            Selection::Group(_) => BookScope::All,
         }
     }
 }
@@ -185,6 +192,26 @@ pub struct State {
     pub show_properties: bool,
     /// Editing copy of the current collection's registry entry (`None` = not registered).
     pub props: Option<CollectionInfo>,
+    // -- Group editor (the original's Группа menu + frm_EditGroup) ----------------------------
+    /// The create/rename-group dialog: mode + text input buffer.
+    pub group_edit: Option<(GroupEditMode, String)>,
+    /// Pending group deletion/clear confirmation: `(group_id, name, clear_only)`.
+    pub group_delete_confirm: Option<(i64, String, bool)>,
+    /// The «add selected book to a group» picker.
+    pub show_group_picker: bool,
+    /// `(group_id, name, book count)` rows for the Группы tab's left tree and the picker.
+    pub groups_cache: Vec<(i64, String, i64)>,
+    /// Bumped on any group-membership mutation; invalidates the per-group id cache.
+    groups_version: u64,
+    /// Cached member book ids for `(group_id, groups_version)`.
+    group_ids_cache: Option<(i64, u64, Vec<i64>)>,
+}
+
+/// Which group the create/rename dialog is editing.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GroupEditMode {
+    Create,
+    Rename(i64),
 }
 
 /// Editor buffers for the new-collection wizard. Mirrors the original wizard's
@@ -254,6 +281,12 @@ impl State {
             wizard: WizardData::default(),
             show_properties: false,
             props: None,
+            group_edit: None,
+            group_delete_confirm: None,
+            show_group_picker: false,
+            groups_cache: Vec::new(),
+            groups_version: 0,
+            group_ids_cache: None,
         };
         s.reload();
         s
@@ -272,12 +305,15 @@ impl State {
                 only_local: self.filters.only_local,
                 include_deleted: false,
             })
+        } else if let Selection::Group(g) = self.selection {
+            ListSource::Group(g)
         } else {
             ListSource::Scope(self.selection.clone().into())
         };
         let total = match &source {
             ListSource::Search(q) => self.db.count_books(q),
             ListSource::Scope(s) => self.db.count_scope_books(s),
+            ListSource::Group(g) => Ok(self.group_book_ids(*g).len() as i64),
         };
         self.list_source = source;
         self.list_total = total.unwrap_or(0);
@@ -305,6 +341,12 @@ impl State {
         let books = match &self.list_source {
             ListSource::Search(q) => self.db.search_books(q, c, s).unwrap_or_default(),
             ListSource::Scope(sc) => self.db.list_scope_books(sc, c, s).unwrap_or_default(),
+            // Group membership lives in the system DB: page over the id list, fetch rows by id.
+            ListSource::Group(g) => {
+                let ids = self.group_book_ids(*g);
+                let slice = &ids[s as usize..(s + c) as usize];
+                self.db.list_books_by_ids(slice).unwrap_or_default()
+            }
         };
         self.win_key = Some(self.list_source.clone());
         self.win_start = s;
@@ -406,12 +448,13 @@ impl State {
                     }
                 }
             }
-            4 => { // Группы (folder-based grouping for now)
-                if let Ok(v) = self.db.list_folder_nodes() {
-                    for (folder, count) in v {
-                        let label = folder.clone().unwrap_or_else(|| "(root)".to_string());
-                        out.push(TreeNode { selection: Selection::Folder(folder), label, count });
-                    }
+            4 => { // Группы — real reading groups from the system DB (the original's groups view)
+                for (id, name, count) in self.refresh_groups_cache() {
+                    out.push(TreeNode {
+                        selection: Selection::Group(id),
+                        label: name,
+                        count,
+                    });
                 }
             }
             _ => {} // Поиск (3) and Список загрузок (5) have no left tree
@@ -560,7 +603,11 @@ impl State {
 
     /// Attach the system-DB registry (the app runner does this on startup).
     pub fn attach_system(&mut self, system: SystemDb) {
+        // The original seeds «Избранное» / «К прочтению» on a fresh system DB.
+        let _ = system.ensure_default_groups();
         self.system = Some(system);
+        self.refresh_groups_cache();
+        self.tree_built[4] = false;
     }
 
     /// Re-read the registry rows for the manager dialog.
@@ -600,6 +647,8 @@ impl State {
                 self.win_books.clear();
                 self.genre_win_key = None;
                 self.win_genres.clear();
+                self.group_ids_cache = None;
+                self.refresh_groups_cache();
                 self.reload();
                 let name = self
                     .collection_rows
@@ -896,6 +945,182 @@ impl State {
         }
         self.reload();
         self.status = format!("Импорт: {applied} книг обновлено, {missing} не найдено{groups_msg}");
+    }
+
+    // -- Group editor (the original's Группа menu) ------------------------------------------
+
+    /// `(group_id, name, member count for the current collection)` for the Группы tab + picker.
+    /// One system-DB query; cached in `groups_cache` and rebuilt by `refresh_groups_cache`.
+    pub fn refresh_groups_cache(&mut self) -> Vec<(i64, String, i64)> {
+        if let (Some(sys), Some(dbid)) = (self.system.as_ref(), self.current_database_id()) {
+            if let Ok(members) = sys.list_group_books(dbid) {
+                if let Ok(groups) = sys.list_groups() {
+                    self.groups_cache = groups
+                        .into_iter()
+                        .map(|(gid, name)| {
+                            let count = members.iter().filter(|m| m.0 == gid).count() as i64;
+                            (gid, name, count)
+                        })
+                        .collect();
+                }
+            }
+        } else {
+            self.groups_cache.clear();
+        }
+        self.groups_cache.clone()
+    }
+
+    /// Member book ids of a group (collection-local ids), cached per groups_version.
+    fn group_book_ids(&mut self, group_id: i64) -> Vec<i64> {
+        if let Some((g, v, ids)) = &self.group_ids_cache {
+            if *g == group_id && *v == self.groups_version {
+                return ids.clone();
+            }
+        }
+        let ids = match (self.system.as_ref(), self.current_database_id()) {
+            (Some(sys), Some(dbid)) => sys
+                .list_group_books(dbid)
+                .map(|rows| rows.into_iter().filter(|r| r.0 == group_id).map(|r| r.2).collect())
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        self.group_ids_cache = Some((group_id, self.groups_version, ids.clone()));
+        ids
+    }
+
+    /// Bump the membership version and rebuild every group-dependent view.
+    fn groups_changed(&mut self) {
+        self.groups_version += 1;
+        self.group_ids_cache = None;
+        self.tree_built[4] = false;
+        self.refresh_groups_cache();
+        // The open view may be the changed group itself — recompute totals.
+        self.reload();
+    }
+
+    /// `Группа → Создать…` / `Переименовать…`: open the name prompt.
+    pub fn open_group_edit(&mut self, mode: GroupEditMode) {
+        let initial = match mode {
+            GroupEditMode::Create => String::new(),
+            GroupEditMode::Rename(id) => self
+                .groups_cache
+                .iter()
+                .find(|g| g.0 == id)
+                .map(|g| g.1.clone())
+                .unwrap_or_default(),
+        };
+        self.group_edit = Some((mode, initial));
+    }
+
+    /// Apply the create/rename prompt.
+    pub fn apply_group_edit(&mut self) {
+        let Some((mode, text)) = self.group_edit.take() else { return };
+        let name = text.trim().to_string();
+        if name.is_empty() {
+            self.status = "Имя группы не может быть пустым".into();
+            return;
+        }
+        let Some(sys) = self.system.as_ref() else {
+            self.status = "системная база недоступна".into();
+            return;
+        };
+        let res = match mode {
+            GroupEditMode::Create => sys.add_group(&name, true).map(|_| ()),
+            GroupEditMode::Rename(id) => sys.rename_group(id, &name),
+        };
+        match res {
+            Ok(()) => {
+                self.status = format!("Группа «{name}» сохранена");
+                self.groups_changed();
+            }
+            Err(e) => {
+                self.status = e.to_string();
+                self.group_edit = Some((mode, text)); // keep the dialog open with the input
+            }
+        }
+    }
+
+    /// Delete a group (all memberships) or just clear it, after confirmation.
+    pub fn delete_or_clear_group(&mut self, group_id: i64, clear_only: bool) {
+        self.group_delete_confirm = None;
+        let Some(sys) = self.system.as_ref() else { return };
+        let res = if clear_only {
+            sys.clear_group(group_id)
+        } else {
+            sys.delete_group(group_id)
+        };
+        match res {
+            Ok(()) => {
+                // A cleared group stays (now empty); a deleted one doesn't — fall back to All.
+                if !clear_only {
+                    if let Selection::Group(g) = self.selection {
+                        if g == group_id {
+                            self.selection = Selection::All;
+                        }
+                    }
+                }
+                self.status = if clear_only {
+                    "Группа очищена".into()
+                } else {
+                    "Группа удалена".into()
+                };
+                self.groups_changed();
+            }
+            Err(e) => self.status = e.to_string(),
+        }
+    }
+
+    /// Add the selected book to a group (the original's context «Добавить в группу»).
+    pub fn add_selected_to_group(&mut self, group_id: i64) {
+        self.show_group_picker = false;
+        let Some(book_id) = self.selected_book_id else {
+            self.status = "Сначала выберите книгу".into();
+            return;
+        };
+        let Some(dbid) = self.current_database_id() else {
+            self.status = "Коллекция не зарегистрирована — группы недоступны".into();
+            return;
+        };
+        let Some(sys) = self.system.as_ref() else { return };
+        // Need libid + title for the system-DB Books row.
+        match self.db.get_book(book_id) {
+            Ok(Some(b)) => match sys.add_group_book(group_id, book_id, dbid, &b.lib_id, &b.title) {
+                Ok(()) => {
+                    let name = self
+                        .groups_cache
+                        .iter()
+                        .find(|g| g.0 == group_id)
+                        .map(|g| g.1.clone())
+                        .unwrap_or_default();
+                    self.status = format!("«{}» добавлена в «{name}»", b.title);
+                    self.groups_changed();
+                }
+                Err(e) => self.status = e.to_string(),
+            },
+            _ => self.status = "Книга не найдена".into(),
+        }
+    }
+
+    /// Remove the selected book from the open group (the original's «Удалить из группы»).
+    pub fn remove_selected_from_group(&mut self) {
+        let Selection::Group(g) = self.selection else {
+            self.status = "Откройте группу, чтобы удалить книгу из неё".into();
+            return;
+        };
+        let Some(book_id) = self.selected_book_id else {
+            self.status = "Сначала выберите книгу".into();
+            return;
+        };
+        let Some(dbid) = self.current_database_id() else { return };
+        let Some(sys) = self.system.as_ref() else { return };
+        match sys.remove_group_book(g, book_id, dbid) {
+            Ok(()) => {
+                self.selected_book_id = None;
+                self.status = "Книга удалена из группы".into();
+                self.groups_changed();
+            }
+            Err(e) => self.status = e.to_string(),
+        }
     }
 
     /// Save the edited properties back to the registry.

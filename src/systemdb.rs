@@ -236,18 +236,10 @@ impl SystemDb {
 
     /// Find or create a group by name; returns its id (the original's `ImportUserData`).
     pub fn upsert_group(&self, name: &str) -> Result<i64> {
-        let existing: Option<i64> = self
-            .conn
-            .query_row("SELECT GroupID FROM Groups WHERE GroupName = ?1", [name], |r| r.get(0))
-            .optional()?;
-        if let Some(id) = existing {
-            return Ok(id);
+        match self.find_group_by_name(name)? {
+            Some((id, _)) => Ok(id),
+            None => self.add_group(name, true),
         }
-        self.conn.execute(
-            "INSERT INTO Groups (GroupName, AllowDelete) VALUES (?1, 1)",
-            [name],
-        )?;
-        Ok(self.conn.last_insert_rowid())
     }
 
     /// Put a book into a group for a given collection. Ensures the system-DB `Books` row exists
@@ -271,6 +263,87 @@ impl SystemDb {
             "INSERT OR IGNORE INTO BookGroups (GroupID, BookID, DatabaseID) VALUES (?1, ?2, ?3)",
             params![group_id, book_id, database_id],
         )?;
+        Ok(())
+    }
+
+    /// Create a group with an explicit `AllowDelete` flag. The original's built-ins
+    /// («Избранное», «К прочтению») are `AllowDelete = 0` and can't be deleted.
+    pub fn add_group(&self, name: &str, allow_delete: bool) -> Result<i64> {
+        if self.find_group_by_name(name)?.is_some() {
+            return Err(AppError::msg(format!("group “{name}” already exists")));
+        }
+        self.conn.execute(
+            "INSERT INTO Groups (GroupName, AllowDelete) VALUES (?1, ?2)",
+            params![name, allow_delete as i64],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Find a group by exact name.
+    pub fn find_group_by_name(&self, name: &str) -> Result<Option<(i64, bool)>> {
+        // (GroupID, AllowDelete)
+        self.conn
+            .query_row(
+                "SELECT GroupID, AllowDelete FROM Groups WHERE GroupName = ?1",
+                [name],
+                |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0)),
+            )
+            .optional()
+            .map_err(AppError::from)
+    }
+
+    /// Rename a group.
+    pub fn rename_group(&self, group_id: i64, new_name: &str) -> Result<()> {
+        let n = self
+            .conn
+            .execute("UPDATE Groups SET GroupName = ?2 WHERE GroupID = ?1", params![group_id, new_name])?;
+        if n == 0 {
+            return Err(AppError::msg(format!("group #{group_id} not found")));
+        }
+        Ok(())
+    }
+
+    /// Delete a group and all its memberships. Refuses protected groups (`AllowDelete = 0`,
+    /// the original's InternalClearGroup/DELETE only removes deletable ones).
+    pub fn delete_group(&self, group_id: i64) -> Result<()> {
+        let deletable: Option<i64> = self
+            .conn
+            .query_row("SELECT AllowDelete FROM Groups WHERE GroupID = ?1", [group_id], |r| r.get(0))
+            .optional()?;
+        match deletable {
+            Some(1) => {
+                self.conn.execute("DELETE FROM BookGroups WHERE GroupID = ?1", [group_id])?;
+                self.conn.execute("DELETE FROM Groups WHERE GroupID = ?1", [group_id])?;
+                Ok(())
+            }
+            Some(_) => Err(AppError::msg("эту группу нельзя удалить")),
+            None => Err(AppError::msg(format!("group #{group_id} not found"))),
+        }
+    }
+
+    /// Remove all book memberships from a group (the original's ClearGroup) — the group stays.
+    pub fn clear_group(&self, group_id: i64) -> Result<()> {
+        self.conn.execute("DELETE FROM BookGroups WHERE GroupID = ?1", [group_id])?;
+        Ok(())
+    }
+
+    /// Remove one book from a group (for this collection).
+    pub fn remove_group_book(&self, group_id: i64, book_id: i64, database_id: i64) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM BookGroups WHERE GroupID = ?1 AND BookID = ?2 AND DatabaseID = ?3",
+            params![group_id, book_id, database_id],
+        )?;
+        Ok(())
+    }
+
+    /// The original seeds two protected groups on a fresh system DB («Избранное» / «К прочтению»).
+    /// Idempotent: only runs when the Groups table is empty.
+    pub fn ensure_default_groups(&self) -> Result<()> {
+        let n: i64 = self.conn.query_row("SELECT COUNT(*) FROM Groups", [], |r| r.get(0))?;
+        if n == 0 {
+            self.add_group("Избранное", false)?;
+            self.add_group("К прочтению", false)?;
+        }
         Ok(())
     }
 

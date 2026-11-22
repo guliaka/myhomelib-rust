@@ -162,8 +162,8 @@ a virtualized multi-column book grid (Название / № / Размер / Р
 `Books.update_date`); Поиск hosts the multi-field search form + results; Список загрузок shows the download queue.
 A bottom info band (the original's TInfoPanel) shows the selected book's details + genres; a TStatusBar sits at the
 very bottom. Virtualization is unchanged — only the visible slice is ever materialized, so 1M+ libraries stay fast.
-*Known delta:* «Группы» currently shows the folder tree (the original's user-defined groups aren't ported; folders
-are the closest existing organization).
+*Known delta (fixed by D18):* «Группы» showed the folder tree until the real groups view landed; it now shows the
+system-DB reading groups.
 
 ### D15 — Grid = original's exact columns (incl. star rating + genre) + real icon toolbar, on `devel`
 The book grid now matches the original's column set exactly: **Title** (no header) / **№** / **Размер** /
@@ -246,8 +246,28 @@ Three exchange formats, all byte-compatible with the original app:
   `myhomelib userdata export|import <db> <file> [--system …]`.
 - New dep: `flate2` (pure Rust) for the zlib user-data file.
 
-*Known delta:* the original's group editor UI (create/rename/delete groups, assign books) is still
-unported — groups are populated via user-data import for now.
+*Known delta (fixed by D18):* the original's group editor UI (create/rename/delete groups, assign books) landed
+as D18 — groups are now fully editable in the GUI, not just importable.
+
+### D18 — Group editor UI (create / rename / delete / clear / assign books) + the real Группы tab
+The «Группа» menu now carries the original's `acGroup*` actions, and the **Группы tab shows the real
+system-DB reading groups** (id + name + per-collection member count) instead of the folder tree —
+the original's `frm_main` groups view. Selecting a group lists its member books in the virtualized
+grid: membership ids come from the system DB (`list_group_books`, cached per groups_version) and rows
+are fetched from the collection DB with the new `Db::list_books_by_ids` — the list stays O(visible).
+
+- **Create / rename** — the original's `frm_EditGroup` name prompt; duplicate names are rejected,
+  empty names refused. **Delete** removes the group + all memberships and refuses protected groups
+  (`AllowDelete = 0` — «Избранное» / «К прочтению», seeded on a fresh system DB exactly like the
+  original). **Clear** empties a group but keeps it (and keeps it selected, now empty).
+- **Assign** — `Книга → Добавить в группу…` opens the group picker (the original's context submenu;
+  re-adding is a no-op via `INSERT OR IGNORE`). `Удалить из группы` removes the selected book from
+  the open group. Both need the collection registered in the system DB — unregistered collections
+  report it in the status bar.
+- All mutations bump a `groups_version` that invalidates the member-id cache and rebuilds the tab-4
+  tree; `switch_collection` resets the group caches for the new collection.
+- The folder-tree grouping that previously occupied tab 4 is gone — the original has no folders tab;
+  folder filtering remains reachable through search.
 
 ---
 
