@@ -9,7 +9,7 @@ name: Windows build (devel)
 #                               workflows never double-fire on the same event.
 on:
   push:
-    branches: [devel]
+    branches: [devel, GLM-v2]
   workflow_dispatch: {}
 
 jobs:
