@@ -53,6 +53,6 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: myhomelib-windows-devel
+          name: myhomelib-$short
           path: dist/*.exe
           if-no-files-found: error
